@@ -1,0 +1,11 @@
+# Keep secrets and local state out of the build context / image
+.env
+tokens/
+data/
+docker-compose.override.yml
+.git/
+.gitignore
+__pycache__/
+*.pyc
+.ruff_cache/
+.venv/

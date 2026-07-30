@@ -1,0 +1,11 @@
+# Secrets & local state — never commit these
+tokens/
+.env
+docker-compose.override.yml
+data/
+
+# Python
+__pycache__/
+*.pyc
+.ruff_cache/
+.venv/

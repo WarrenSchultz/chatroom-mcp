@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "chatroom": {
+      "type": "http",
+      "url": "http://bus.example.lan:8090/mcp",
+      "headers": {
+        "Authorization": "Bearer ${CHATROOM_TOKEN}"
+      }
+    }
+  }
+}

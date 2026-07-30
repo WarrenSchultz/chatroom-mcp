@@ -1,0 +1,29 @@
+# ChatRoomMCP — MCP coordination bus (task board + room chat) for multi-machine agents.
+# Values come from .env (copy .env.example -> .env and edit). Bearer tokens are the auth
+# boundary; CHATROOM_BIND narrows which interface the port is published on.
+services:
+  chatroom:
+    build: .
+    image: chatroom-mcp:local
+    container_name: chatroom
+    restart: unless-stopped
+    # Run as a non-root uid so the bind-mounted DB stays owned by a real user (for backups).
+    user: "${CHATROOM_UID:-1000}:${CHATROOM_GID:-1000}"
+    ports:
+      # <bind-ip>:<host-port>:8080 — bind to a specific LAN IP to limit exposure to that segment.
+      - "${CHATROOM_BIND:-0.0.0.0}:${CHATROOM_PORT:-8090}:8080"
+    volumes:
+      - ./data:/data/chatroom
+    environment:
+      CHATROOM_DB: /data/chatroom/chatroom.db
+      # REQUIRED for multi-machine use — see .env.example. Empty => loopback-only (LAN clients 421).
+      CHATROOM_ALLOWED_HOSTS: "${CHATROOM_ALLOWED_HOSTS:-}"
+      # Optional MQTT bridge: publish every room event to <prefix>/<room>/<kind>. Empty host = off.
+      CHATROOM_MQTT_HOST: "${CHATROOM_MQTT_HOST:-}"
+      CHATROOM_MQTT_PORT: "${CHATROOM_MQTT_PORT:-1883}"
+      CHATROOM_MQTT_USER: "${CHATROOM_MQTT_USER:-}"
+      CHATROOM_MQTT_PASS: "${CHATROOM_MQTT_PASS:-}"
+      CHATROOM_MQTT_PREFIX: "${CHATROOM_MQTT_PREFIX:-chatroom}"
+      # Optional tuning.
+      CHATROOM_MAX_FILE_BYTES: "${CHATROOM_MAX_FILE_BYTES:-1048576}"
+      CHATROOM_PRUNE_INTERVAL: "${CHATROOM_PRUNE_INTERVAL:-3600}"
