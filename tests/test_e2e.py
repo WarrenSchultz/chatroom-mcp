@@ -441,6 +441,58 @@ def main() -> int:
               "_tool_error" in Agent(t_box2).call("list_tasks"))
         check("other agents are unaffected", box1.call("list_tasks").get("room") == "projA")
 
+        # --- exposure hardening ------------------------------------------------
+        # Runs last: it deliberately burns the failed-auth budget for 127.0.0.1,
+        # which would otherwise colour later assertions.
+        print("\n--- exposure hardening (tunnel / public reachability) ---")
+        from chatroom import security
+
+        exp = security.expand_allowed_hosts(["chat.example.com:*", "10.0.0.5:8090", " ", ""])
+        check("host allowlist keeps the ':*' form", "chat.example.com:*" in exp, str(exp))
+        check("host allowlist also covers the portless form",
+              "chat.example.com" in exp, str(exp))
+        check("host allowlist preserves an exact host:port entry",
+              "10.0.0.5:8090" in exp and len([e for e in exp if e.strip()]) == 3, str(exp))
+
+        # A tunnel/HTTPS front door forwards `Host: name` with no port at all, so
+        # the ':*' entries must admit it or every tunnelled /mcp call 421s while the
+        # REST routes (which are not Host-checked) keep working — a confusing split.
+        mcp_body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        mcp_hdrs = {"Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                    "Authorization": f"Bearer {t_box1}"}
+        portless = rc.post(f"{BASE}/mcp", json=mcp_body,
+                           headers={**mcp_hdrs, "Host": "127.0.0.1"})
+        check("portless Host is accepted on /mcp (the tunnel case)",
+              portless.status_code == 200, f"{portless.status_code} {portless.text[:80]}")
+        foreign = rc.post(f"{BASE}/mcp", json=mcp_body,
+                          headers={**mcp_hdrs, "Host": "evil.example.com"})
+        check("an unlisted Host is still rejected with 421",
+              foreign.status_code == 421, str(foreign.status_code))
+
+        # Only failures count, and a good credential is never throttled: agents
+        # routinely share one apparent address behind a tunnel or NAT, so one stale
+        # token must not be able to lock out its peers.
+        limit = int(os.environ.get("CHATROOM_AUTH_FAIL_LIMIT", "20"))
+        codes = [rc.get(f"{BASE}/v1/tasks",
+                        headers={"Authorization": f"Bearer cr_spray_{i}"}).status_code
+                 for i in range(limit + 2)]
+        check("failed credentials start as 401", codes[0] == 401, str(codes[:3]))
+        check("failed credentials become 429 once the budget is spent",
+              codes[-1] == 429, str(codes[-3:]))
+        spent = rc.get(f"{BASE}/v1/tasks",
+                       headers={"Authorization": "Bearer cr_spray_more"})
+        check("throttled response advertises Retry-After",
+              spent.status_code == 429 and int(spent.headers.get("Retry-After", 0)) > 0,
+              f"{spent.status_code} {spent.headers.get('Retry-After')}")
+        check("a VALID token is never throttled (shared-address safety)",
+              rc.get(f"{BASE}/v1/tasks", headers=h).status_code == 200)
+        check("a valid MCP call also survives the throttle",
+              rc.post(f"{BASE}/mcp", json=mcp_body, headers=mcp_hdrs).status_code == 200)
+        check("a good credential does not reset the window for the address",
+              rc.get(f"{BASE}/v1/tasks",
+                     headers={"Authorization": "Bearer cr_spray_after"}).status_code == 429)
+
         print(f"\n{'=' * 62}")
         print(f"{len(PASS)} passed, {len(FAIL)} failed")
         if FAIL:

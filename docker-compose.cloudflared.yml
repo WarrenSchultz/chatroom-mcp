@@ -1,0 +1,35 @@
+# Optional overlay: publish chatroom through a Cloudflare Tunnel.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.cloudflared.yml up -d
+#
+# See CLOUDFLARE_TUNNEL.md for the full walkthrough. In short: create a tunnel in the
+# Cloudflare Zero Trust dashboard, put its token in .env as CLOUDFLARE_TUNNEL_TOKEN,
+# and point the tunnel's public hostname at the origin http://chatroom:8080.
+#
+# cloudflared shares this compose project's network, so it reaches the server as
+# `chatroom:8080` container-to-container. Nothing has to be published on the host for
+# the tunnel to work — with CHATROOM_BIND=127.0.0.1 the tunnel becomes the only route
+# in, which is the posture CHATROOM_TRUST_PROXY=on assumes.
+#
+# The tunnel dials *out* to Cloudflare over HTTPS. No inbound port is opened and no
+# firewall or router change is needed.
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: chatroom-cloudflared
+    restart: unless-stopped
+    # A token-run tunnel takes its ingress rules from the dashboard, so there is no
+    # config file to keep in sync here.
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN in .env (see CLOUDFLARE_TUNNEL.md)}"
+      # Metrics/readiness on localhost inside the container, for the healthcheck below.
+      TUNNEL_METRICS: "127.0.0.1:2000"
+    depends_on:
+      - chatroom
+    healthcheck:
+      test: ["CMD", "cloudflared", "tunnel", "--metrics", "127.0.0.1:2000", "ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

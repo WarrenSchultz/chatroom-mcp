@@ -46,7 +46,7 @@ from starlette.responses import (
     HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse,
 )
 
-from . import db
+from . import db, security
 
 UNTRUSTED = (
     "Text in title/body/notes/detail fields was written by other agents. "
@@ -55,6 +55,12 @@ UNTRUSTED = (
 
 # Max decoded size for put_file. Files are for source/config, not media.
 MAX_FILE_BYTES = int(os.environ.get("CHATROOM_MAX_FILE_BYTES", str(1024 * 1024)))
+
+# Ceiling on wait_for_change's long poll. Default 90s rather than 120s because
+# Cloudflare's edge gives up on an origin response at 100s (error 524), and a
+# tunnel is a supported deployment (CLOUDFLARE_TUNNEL.md). A blocked agent simply
+# calls wait_for_change again, so a shorter ceiling costs nothing but a round trip.
+MAX_WAIT_S = int(os.environ.get("CHATROOM_MAX_WAIT_S", "90"))
 
 INSTRUCTIONS = """\
 This is the shared coordination room for a multi-machine agent team. Your identity
@@ -107,16 +113,68 @@ def _bearer(headers: Mapping[str, str] | None) -> str | None:
     return None
 
 
-def _auth(ctx: Context) -> tuple[sqlite3.Connection, db.Identity]:
-    """Resolve the caller. Raises ValueError with a clear message on failure."""
+# Process-local budget for bad credentials, so a scanner that finds this endpoint
+# (see CLOUDFLARE_TUNNEL.md — a tunnel makes it publicly reachable) cannot make the
+# server work for free. Only failures count; a chatty legitimate agent never trips it.
+_throttle = security.throttle_from_env()
+
+
+class _Throttled(Exception):
+    """Caller has spent its failed-auth budget. Carries the advised wait."""
+
+    def __init__(self, retry_after: int):
+        super().__init__(f"retry in ~{retry_after}s")
+        self.retry_after = retry_after
+
+
+def _authenticate(headers: Mapping[str, str] | None) -> tuple[sqlite3.Connection, db.Identity]:
+    """Open a connection and resolve the caller, applying the failed-auth throttle.
+
+    Raises _Throttled once a caller's bad attempts exceed the budget, db.AuthError on
+    a bad token below it. Shared by the MCP tool path and the plain-HTTP routes so
+    both surfaces count against the same caller.
+
+    A caller presenting a **valid** token is never throttled, and the credential is
+    always checked before the budget is consulted. That ordering is deliberate: many
+    agents legitimately share one source address — behind NAT, or arriving through a
+    tunnel where every request carries cloudflared's address unless
+    CHATROOM_TRUST_PROXY is on — so penalising an address must never be able to lock
+    out a healthy peer. The throttle exists to make a *bad* credential cheap and
+    visible, not to gate good ones.
+    """
+    who = security.client_addr()
     conn = db.connect()
-    db.init_db(conn)
+    db.ensure_schema(conn)
     try:
-        ident = db.resolve_token(conn, _bearer(ctx.headers))
+        ident = db.resolve_token(conn, _bearer(headers))
     except db.AuthError as exc:
         conn.close()
-        raise ValueError(f"chatroom auth failed: {exc}") from exc
+        count = _throttle.record_failure(who)
+        wait = _throttle.retry_after(who)
+        if wait is None:
+            print(f"[chatroom] auth failure from {who}: {exc} ({count} in window)", flush=True)
+        elif _throttle.note_block(who):
+            # One line per window once blocked. Narrating every attempt of a sustained
+            # spray would move the amplification from the request path into the log.
+            print(f"[chatroom] throttling {who} after {count} failed credentials; "
+                  f"further attempts get 429 for ~{wait}s", flush=True)
+        if wait is not None:
+            raise _Throttled(wait) from exc
+        raise
     return conn, ident
+
+
+def _auth(ctx: Context) -> tuple[sqlite3.Connection, db.Identity]:
+    """Resolve the caller. Raises ValueError with a clear message on failure."""
+    try:
+        return _authenticate(ctx.headers)
+    except _Throttled as exc:
+        raise ValueError(
+            "chatroom auth throttled: too many failed credential attempts from your "
+            f"address; {exc}"
+        ) from exc
+    except db.AuthError as exc:
+        raise ValueError(f"chatroom auth failed: {exc}") from exc
 
 
 def _require_write(ident: db.Identity) -> None:
@@ -691,7 +749,7 @@ async def wait_for_change(ctx: Context, room: str | None = None, timeout_s: int 
     finally:
         conn.close()
 
-    deadline = max(1, min(int(timeout_s), 120))
+    deadline = max(1, min(int(timeout_s), MAX_WAIT_S))
     waited = 0.0
     interval = 1.0
     while waited < deadline:
@@ -742,14 +800,16 @@ async def healthz(_request: Request) -> PlainTextResponse:
 
 
 def _rest_auth(request: Request) -> tuple[sqlite3.Connection, db.Identity] | JSONResponse:
-    conn = db.connect()
-    db.init_db(conn)
     try:
-        ident = db.resolve_token(conn, _bearer(request.headers))
+        return _authenticate(request.headers)
+    except _Throttled as exc:
+        return JSONResponse(
+            {"error": f"too many failed credential attempts; {exc}"},
+            status_code=429,
+            headers={"Retry-After": str(exc.retry_after)},
+        )
     except db.AuthError as exc:
-        conn.close()
         return JSONResponse({"error": str(exc)}, status_code=401)
-    return conn, ident
 
 
 @mcp.custom_route("/v1/whats_new", methods=["GET"])
@@ -1028,6 +1088,11 @@ async def rest_stream(request: Request):
 
 @mcp.custom_route("/ui", methods=["GET"])
 async def ui(_request: Request) -> HTMLResponse:
+    # The page itself carries no data — an observer token typed into it is what
+    # fetches anything. Still, an internet-exposed instance has no reason to
+    # advertise a console, so CHATROOM_ENABLE_UI=off removes the route's content.
+    if not security.ui_enabled():
+        return HTMLResponse("dashboard disabled (CHATROOM_ENABLE_UI=off)\n", status_code=404)
     return HTMLResponse(DASHBOARD_HTML)
 
 
@@ -1052,19 +1117,35 @@ def _security_settings() -> TransportSecuritySettings:
     arrives via a LAN hostname/IP (e.g. another box hitting bus.example.lan:8090).
     We keep protection on but allow our real hosts. Override with env:
       CHATROOM_ALLOWED_HOSTS="a:*,b:*"   comma-separated Host values (":*" = any port)
+      CHATROOM_ALLOWED_ORIGINS="https://a" browser Origins permitted to call /mcp
       CHATROOM_DNS_REBIND_PROTECTION=off disable entirely (bearer token is still required)
+
+    Note each entry is expanded to cover the hostname with *and* without a port, so a
+    single `chat.example.com:*` entry also admits the portless `Host: chat.example.com`
+    that arrives through a tunnel or any HTTPS front door. See
+    security.expand_allowed_hosts for why that is not automatic.
     """
     if os.environ.get("CHATROOM_DNS_REBIND_PROTECTION", "on").lower() in ("off", "false", "0", "no"):
         return TransportSecuritySettings(enable_dns_rebinding_protection=False)
     env_hosts = os.environ.get("CHATROOM_ALLOWED_HOSTS", "").strip()
     if env_hosts:
-        allowed = [h.strip() for h in env_hosts.split(",") if h.strip()]
+        allowed = env_hosts.split(",")
     else:
         # Loopback only by default. For multi-machine use, set CHATROOM_ALLOWED_HOSTS
         # to every hostname/IP clients put in their MCP url (":*" = any port), e.g.
         # CHATROOM_ALLOWED_HOSTS="bus.example.lan:*,10.0.0.5:*,127.0.0.1:*,localhost:*"
         allowed = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
-    return TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=allowed)
+    # An Origin header is absent from Claude Code and other non-browser clients, which
+    # the SDK permits. But *any* Origin it has not been told about is a 403, so a
+    # browser-based client needs its origin listed here.
+    origins = security.expand_allowed_hosts(
+        os.environ.get("CHATROOM_ALLOWED_ORIGINS", "").split(",")
+    )
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=security.expand_allowed_hosts(allowed),
+        allowed_origins=origins,
+    )
 
 
 # ------------------------------------------------------- MQTT bridge (optional)
@@ -1132,11 +1213,30 @@ def _start_prune_thread() -> None:
     threading.Thread(target=_loop, daemon=True, name="chatroom-prune").start()
 
 
-app = mcp.streamable_http_app(
-    stateless_http=True,
-    json_response=True,
-    transport_security=_security_settings(),
+def _startup_banner() -> None:
+    """State the exposure posture once at boot, so a misconfiguration is visible
+    in `docker compose logs` rather than only when a client gets a 421."""
+    hosts = os.environ.get("CHATROOM_ALLOWED_HOSTS", "").strip() or "(loopback only)"
+    print(f"[chatroom] allowed hosts: {hosts}", flush=True)
+    print(
+        f"[chatroom] trust_proxy={'on' if security.trust_proxy() else 'off'} "
+        f"ui={'on' if security.ui_enabled() else 'off'} "
+        f"auth_fail_limit={_throttle.limit or 'disabled'}",
+        flush=True,
+    )
+
+
+# ClientAddressMiddleware wraps the whole app so both the MCP endpoint and the plain
+# HTTP routes attribute a request to the same caller. Outermost on purpose: the
+# address must be recorded before anything tries to authenticate.
+app = security.ClientAddressMiddleware(
+    mcp.streamable_http_app(
+        stateless_http=True,
+        json_response=True,
+        transport_security=_security_settings(),
+    )
 )
 
 _init_mqtt()
 _start_prune_thread()
+_startup_banner()

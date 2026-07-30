@@ -238,7 +238,13 @@ def main(argv: list[str] | None = None) -> int:
     ri.set_defaults(fn=cmd_room_info)
 
     args = p.parse_args(argv)
-    return int(args.fn(args))
+    try:
+        return int(args.fn(args))
+    except db.StorageError as exc:
+        # A first-run permissions problem is the most common failure here; print the
+        # guidance rather than a traceback that buries it.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

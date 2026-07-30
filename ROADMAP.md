@@ -13,6 +13,11 @@
   `DELETE /v1/rooms/<room>`, `POST /v1/rooms/<room>/info`.
 - **MQTT bridge** — set `CHATROOM_MQTT_HOST` and every room event publishes to
   `<prefix>/<room>/<kind>` as JSON, so home-automation can react to agent activity.
+- **Cloudflare Tunnel path** — off-network agents over a hostname you own, no inbound port,
+  on the free plan and without Cloudflare Access ([CLOUDFLARE_TUNNEL.md](CLOUDFLARE_TUNNEL.md)).
+  Came with the hardening that public reachability implies: failed-credential throttle,
+  `/ui` kill switch, opt-in forwarded-address trust, Host allowlist that also matches the
+  portless form a tunnel sends, and a long-poll ceiling under Cloudflare's 100s edge timeout.
 
 ## Ideas not yet built
 - **Inbound webhook:** `POST /v1/hooks/...` so an automation can create a task or post a

@@ -11,6 +11,10 @@ There are two halves:
 
 Then: **[Adding new client tokens](#adding-new-client-tokens)**.
 
+Agents beyond your LAN (another site, a roaming laptop) need the server reachable from
+outside. **[CLOUDFLARE_TUNNEL.md](CLOUDFLARE_TUNNEL.md)** does that with no inbound port and
+no router changes — do the LAN setup below first, then add the tunnel.
+
 Throughout, replace the placeholders:
 
 | Placeholder | Meaning | Example |
@@ -43,11 +47,19 @@ CHATROOM_PORT=8090
 # REQUIRED for multi-machine use: list every host clients will use in their URL.
 # ":*" = any port. Omitting your host => clients get HTTP 421 (Invalid Host header).
 CHATROOM_ALLOWED_HOSTS=<server-host>:*,127.0.0.1:*,localhost:*
+# Must match the user that owns ./data, or the server cannot write its database.
+CHATROOM_UID=1000                           # your `id -u`
+CHATROOM_GID=1000                           # your `id -g`
 ```
 
 > **Why `CHATROOM_ALLOWED_HOSTS` matters:** the MCP SDK has DNS-rebinding protection
 > that, by default, only accepts `localhost`. Any request arriving via a LAN
 > hostname/IP is rejected with `421 Invalid Host header` until you allowlist it here.
+>
+> **Why `./data` ships as an empty directory:** if you delete it, Docker recreates it as
+> **root** on the next `up` and the non-root container user can no longer write there
+> (`admin init` will tell you how to fix it). Recreate it yourself with `mkdir -p data`
+> rather than letting Docker do it.
 
 ### 3. Start it
 ```bash
@@ -81,6 +93,18 @@ CHATROOM_MQTT_USER=<user>
 CHATROOM_MQTT_PASS=<pass>
 CHATROOM_MQTT_PREFIX=chatroom
 ```
+
+### 8. (Optional) Reach it from outside your network
+
+To let agents on other networks join, add a Cloudflare Tunnel — outbound-only, so no port
+forwarding and no static IP. Two things to know before you start:
+
+- The tunnel's public hostname **must** be added to `CHATROOM_ALLOWED_HOSTS`, or MCP calls
+  return `421` even though `/healthz` still answers.
+- Without an identity layer in front, the bearer token becomes the only gate, so review the
+  hardening checklist.
+
+Full walkthrough: **[CLOUDFLARE_TUNNEL.md](CLOUDFLARE_TUNNEL.md)**.
 
 ### Server admin quick reference
 ```bash
@@ -221,5 +245,10 @@ docker compose exec chatroom python -m chatroom.admin revoke --agent <agent>   #
 - Bearer token is the only auth. There is no unauthenticated mode.
 - Over plaintext HTTP, tokens cross the wire in the clear — fine on a trusted LAN
   segment; put TLS or a reverse proxy in front otherwise (one line of `url`, no code).
+  A [Cloudflare Tunnel](CLOUDFLARE_TUNNEL.md) gives you TLS on the public leg for free.
+- If the server is reachable from the internet, the token is the *only* thing protecting a
+  room. Mint one token per machine, prefer room-scoped over `--all-rooms` for off-site boxes,
+  and grep `docker compose logs chatroom` for `auth failure` — background internet noise
+  doesn't send bearer tokens, so repeated failures mean someone is actually trying.
 - Don't store a token anywhere world/backup-readable. Keep the server's `tokens/`
   directory (and `.env`) out of version control — both are gitignored here.

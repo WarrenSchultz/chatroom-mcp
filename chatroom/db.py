@@ -34,6 +34,7 @@ import json
 import os
 import secrets
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 from collections.abc import Sequence
@@ -139,14 +140,48 @@ def db_path() -> Path:
     return Path(os.environ.get("CHATROOM_DB", DEFAULT_DB))
 
 
+class StorageError(Exception):
+    """The database file cannot be opened, with a hint about how to fix it."""
+
+
+def _storage_hint(p: Path, exc: Exception) -> StorageError:
+    """Turn 'unable to open database file' into something actionable.
+
+    Almost always this is the containerised case: ./data did not exist, so Docker
+    created the bind-mount source as root, and the container's non-root user cannot
+    write there. The raw sqlite3 message names neither the directory nor the uid, which
+    makes a first-run failure needlessly hard to place.
+    """
+    uid = getattr(os, "getuid", lambda: "?")()
+    gid = getattr(os, "getgid", lambda: "?")()
+    return StorageError(
+        f"cannot open the chatroom database at {p}: {exc}\n"
+        f"  The directory {p.parent} must be writable by uid {uid}:{gid} (this process).\n"
+        f"  In Docker this usually means ./data is owned by root. Fix on the host with:\n"
+        f"    sudo chown -R $(id -u):$(id -g) ./data\n"
+        f"  and set CHATROOM_UID / CHATROOM_GID in .env to your `id -u` / `id -g`."
+    )
+
+
 def connect(path: str | Path | None = None) -> sqlite3.Connection:
     p = Path(path) if path else db_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p), timeout=10.0, isolation_level=None)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA busy_timeout=8000")
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise _storage_hint(p, exc) from exc
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(str(p), timeout=10.0, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        # Switching to WAL is the first *write*. An unwritable file opens fine and
+        # fails here instead, so the guard has to cover the pragmas, not just connect().
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=8000")
+    except sqlite3.OperationalError as exc:
+        if conn is not None:
+            conn.close()
+        raise _storage_hint(p, exc) from exc
     return conn
 
 
@@ -173,6 +208,30 @@ def _migrate(conn: sqlite3.Connection) -> None:
     ):
         if col not in rcols:
             conn.execute(f"ALTER TABLE rooms ADD COLUMN {col} {decl}")
+
+
+_SCHEMA_READY = False
+_SCHEMA_LOCK = threading.Lock()
+
+
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    """Run init_db once per process instead of once per request.
+
+    init_db is idempotent, but it is ~20 statements (the CREATE script plus the
+    PRAGMA table_info migration probes). The request path used to pay that on
+    every call *before* checking the credential, which let an unauthenticated
+    caller drive real work per request. Doing it once leaves auth as a single
+    indexed SELECT. The server calls this; `admin init` still calls init_db
+    directly, which is what actually creates the file.
+    """
+    global _SCHEMA_READY
+    if _SCHEMA_READY:
+        return
+    with _SCHEMA_LOCK:
+        if _SCHEMA_READY:
+            return
+        init_db(conn)
+        _SCHEMA_READY = True
 
 
 # ---------------------------------------------------------------- tokens

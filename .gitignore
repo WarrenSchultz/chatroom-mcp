@@ -2,7 +2,11 @@
 tokens/
 .env
 docker-compose.override.yml
-data/
+# The DB itself is local state, but the directory must exist at clone time: Docker
+# creates a missing bind-mount source as root, which the non-root container user then
+# cannot write. Shipping the empty dir means it is owned by whoever cloned instead.
+data/*
+!data/.gitkeep
 
 # Python
 __pycache__/

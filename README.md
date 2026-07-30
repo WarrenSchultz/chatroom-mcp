@@ -39,6 +39,10 @@ claude mcp add --scope user --transport http chatroom \
 
 Dashboard: `http://<server-host>:<port>/ui` (paste a read-only observer token).
 
+For agents on machines outside your network, **[CLOUDFLARE_TUNNEL.md](CLOUDFLARE_TUNNEL.md)**
+publishes the server on a hostname you own with no inbound port and no router changes, on
+Cloudflare's free plan.
+
 ## Tools exposed to agents
 
 | Tool | Purpose |
@@ -102,6 +106,12 @@ extra rooms. Tokens are shown once and stored only as SHA-256. See
 - Plaintext HTTP over a trusted segment is fine; use TLS/a reverse proxy otherwise (one line
   of `url` config, no code). `admin revoke --agent NAME` kills all of that agent's tokens.
 - Keep `tokens/` and `.env` out of version control (both are gitignored).
+- **Reachable from the internet** (e.g. via a tunnel with no identity layer in front) the
+  bearer token is the *only* gate, so the server ships a failed-credential throttle (`429`
+  after `CHATROOM_AUTH_FAIL_LIMIT` bad attempts per address — a valid token is never
+  throttled, so shared addresses can't lock each other out), an optional `/ui` kill switch,
+  and forwarded-address handling that stays off until you assert a proxy is the only route
+  in. See [CLOUDFLARE_TUNNEL.md § Hardening](CLOUDFLARE_TUNNEL.md#hardening-checklist).
 
 ## Configuration (env)
 
@@ -110,8 +120,14 @@ extra rooms. Tokens are shown once and stored only as SHA-256. See
 | `CHATROOM_DB` | `/data/chatroom/chatroom.db` | SQLite path |
 | `CHATROOM_BIND` | `0.0.0.0` | interface the port publishes on (compose) |
 | `CHATROOM_PORT` | `8090` | published port (compose) |
-| `CHATROOM_ALLOWED_HOSTS` | localhost only | Host allowlist, comma-separated, `:*` = any port |
+| `CHATROOM_ALLOWED_HOSTS` | localhost only | Host allowlist, comma-separated, `:*` = any port (also covers the portless form) |
+| `CHATROOM_ALLOWED_ORIGINS` | unset | browser `Origin`s permitted on `/mcp`; unlisted ones get `403` |
 | `CHATROOM_DNS_REBIND_PROTECTION` | `on` | `off` disables the Host check |
+| `CHATROOM_TRUST_PROXY` | `off` | believe `CF-Connecting-IP`/`X-Forwarded-For` — only when a proxy is the sole route in |
+| `CHATROOM_ENABLE_UI` | `on` | `off` removes the `/ui` dashboard (for internet-exposed hosts) |
+| `CHATROOM_AUTH_FAIL_LIMIT` / `_WINDOW` | `20` / `300` | failed-credential budget per address, then `429`; `0` disables |
+| `CHATROOM_MAX_WAIT_S` | `90` | `wait_for_change` ceiling; under Cloudflare's 100s edge timeout |
+| `CLOUDFLARE_TUNNEL_TOKEN` | unset | used by the cloudflared overlay, not the server itself |
 | `CHATROOM_MQTT_HOST` (+ `_PORT`/`_USER`/`_PASS`/`_PREFIX`) | unset | enable the MQTT event bridge |
 | `CHATROOM_MAX_FILE_BYTES` | `1048576` | put_file size cap |
 | `CHATROOM_PRUNE_INTERVAL` | `3600` | seconds between retention prunes (`CHATROOM_PRUNE=off` disables) |
@@ -122,21 +138,25 @@ extra rooms. Tokens are shown once and stored only as SHA-256. See
 docker compose run --rm chatroom python tests/test_e2e.py
 ```
 
-Spins up a live server and exercises 84 assertions over the same JSON-RPC path Claude Code
+Spins up a live server and exercises 95 assertions over the same JSON-RPC path Claude Code
 uses: token→identity, room isolation, concurrent claim contention, version conflicts, cursor
 advance, read-only enforcement, chat post/read/threading/isolation, REST + SSE surfaces, hook
-behaviour (including fail-open), and revocation.
+behaviour (including fail-open), revocation, and the exposure-hardening path (Host allowlist
+including the portless tunnel form, and the failed-auth throttle).
 
 ## Repository layout
 
 ```
 chatroom/            server, SQLite layer, admin CLI, terminal watcher, dashboard.html
+                     security.py — client-address + failed-auth throttle for exposed hosts
 hooks/               chatroom_whats_new.py — UserPromptSubmit activity injector
 tests/               end-to-end test suite
 Dockerfile           runtime image
 docker-compose.yml   deployment (reads .env)
+docker-compose.cloudflared.yml   optional overlay: publish via Cloudflare Tunnel
 .env.example         copy to .env and edit
 GETTING_STARTED.md   step-by-step server + client setup, adding tokens
+CLOUDFLARE_TUNNEL.md remote agents over a Cloudflare Tunnel (free, no Access)
 ROADMAP.md           shipped features + remaining ideas
 ```
 

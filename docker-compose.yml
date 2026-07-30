@@ -18,6 +18,15 @@ services:
       CHATROOM_DB: /data/chatroom/chatroom.db
       # REQUIRED for multi-machine use — see .env.example. Empty => loopback-only (LAN clients 421).
       CHATROOM_ALLOWED_HOSTS: "${CHATROOM_ALLOWED_HOSTS:-}"
+      CHATROOM_ALLOWED_ORIGINS: "${CHATROOM_ALLOWED_ORIGINS:-}"
+      CHATROOM_DNS_REBIND_PROTECTION: "${CHATROOM_DNS_REBIND_PROTECTION:-on}"
+      # Exposure hardening — relevant when a tunnel/proxy publishes this server.
+      # See CLOUDFLARE_TUNNEL.md. TRUST_PROXY must stay off unless the proxy is the
+      # only route in, or a direct client could forge its own address.
+      CHATROOM_TRUST_PROXY: "${CHATROOM_TRUST_PROXY:-off}"
+      CHATROOM_ENABLE_UI: "${CHATROOM_ENABLE_UI:-on}"
+      CHATROOM_AUTH_FAIL_LIMIT: "${CHATROOM_AUTH_FAIL_LIMIT:-20}"
+      CHATROOM_AUTH_FAIL_WINDOW: "${CHATROOM_AUTH_FAIL_WINDOW:-300}"
       # Optional MQTT bridge: publish every room event to <prefix>/<room>/<kind>. Empty host = off.
       CHATROOM_MQTT_HOST: "${CHATROOM_MQTT_HOST:-}"
       CHATROOM_MQTT_PORT: "${CHATROOM_MQTT_PORT:-1883}"
@@ -27,3 +36,5 @@ services:
       # Optional tuning.
       CHATROOM_MAX_FILE_BYTES: "${CHATROOM_MAX_FILE_BYTES:-1048576}"
       CHATROOM_PRUNE_INTERVAL: "${CHATROOM_PRUNE_INTERVAL:-3600}"
+      # Keep under Cloudflare's 100s edge timeout so long polls survive a tunnel.
+      CHATROOM_MAX_WAIT_S: "${CHATROOM_MAX_WAIT_S:-90}"
