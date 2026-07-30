@@ -67,6 +67,56 @@ the host for the tunnel to work.
 
 Cloudflare creates the DNS record for `chat.example.com` for you.
 
+#### Choosing the hostname
+
+Pick something that doesn't announce what it is — `chat` on a company domain invites a look,
+and a name that reads as "agent coordination bus" tells anyone who finds it what they found.
+But be clear about how much that buys you, because it is easy to over-trust:
+
+**A hostname on a public domain is not a secret.** Several mechanisms leak it without anyone
+guessing:
+
+- **Certificate Transparency.** Every publicly-trusted certificate is logged and searchable
+  (`crt.sh`). Cloudflare's Universal SSL usually covers `example.com` plus a one-level
+  wildcard `*.example.com`, so a single-label name is often *not* individually
+  listed — but that is a side effect of the wildcard, not a guarantee. Advanced Certificate
+  Manager, a custom cert, or a second label (`a.b.example.com`, outside the wildcard) each
+  put the exact name in a public log. Check your own zone with
+  `curl -s 'https://crt.sh/?q=%25.example.com&output=json'` rather than assuming.
+- **Passive DNS.** Resolvers and scanners aggregate observed lookups. Once your agents start
+  resolving the name from various networks, it can surface in those datasets.
+- **Wordlists.** Subdomain brute-forcing is cheap and constant. Short pronounceable strings
+  are exactly what the common lists contain, and a four-letter initialism is usually also a
+  standard abbreviation for something unrelated (`pdu`, `nas`, `crm`), which makes it *more*
+  likely to be in a list, not less. If you want length to matter, it has to be random rather
+  than an acronym — and at that point you are building a secret out of something that leaks.
+
+So treat the hostname as **public but unadvertised**: worth choosing carefully because it
+keeps you out of casual scans and cuts log noise, and worth never counting on.
+
+**What actually carries the weight** is the bearer token: `secrets.token_urlsafe(32)` is 256
+bits of entropy, stored only as SHA-256. Finding the hostname lets someone knock; it does not
+let them in, and the failed-auth throttle makes knocking cheap for you and pointless for them.
+If your threat model needs the *endpoint* hidden rather than just the credential strong, a
+hostname is the wrong tool — use Access with service tokens, or a VPN/WireGuard path instead.
+
+**A better free lever than obscurity.** The Cloudflare free plan includes 5 WAF custom rules.
+One rule that blocks requests arriving without an `Authorization` header stops essentially all
+background scanning at the edge, before it reaches your line or your logs:
+
+```text
+(http.host eq "chat.example.com" and not len(http.request.headers["authorization"]) > 0
+ and http.request.uri.path ne "/healthz")   ->   Block
+```
+
+Keep `/healthz` exempt so you can still probe liveness, and drop the `/ui` exemption entirely
+if you set `CHATROOM_ENABLE_UI=off`. This is a real control, unlike a clever name.
+
+> Using a company domain also ties this service to your organisation in anyone's eyes who
+> finds it. If the rooms will carry client or project material, that is a conversation with
+> whoever owns your security posture, not just a naming decision — see
+> [Why no Access](#why-no-access-and-what-that-costs-you).
+
 ### 2. Configure this side
 
 Put the token in `.env`, and — **this is the step everyone misses** — add the public hostname
@@ -206,8 +256,13 @@ Worth doing whenever the tunnel is what makes this server reachable:
 - [ ] **Watch the logs.** `docker compose logs chatroom | grep 'auth failure'` is your
       intrusion signal. Background internet noise doesn't send bearer tokens, so repeated
       auth failures mean someone found the hostname and is trying.
+- [ ] **Block tokenless requests at the edge.** The free plan's WAF custom rules let you drop
+      anything arriving without an `Authorization` header, which is all background scanning —
+      see [Choosing the hostname](#choosing-the-hostname) for the expression. Worth far more
+      than an unguessable hostname, which leaks through Certificate Transparency, passive DNS,
+      and wordlists no matter how clever it is.
 - [ ] **Optional: a free WAF rate-limit rule.** Cloudflare's free plan includes one rate
-      limiting rule — scoping it to `chat.example.com` caps abuse at the edge, before it uses
+      limiting rule — scoping it to your hostname caps abuse at the edge, before it uses
       your bandwidth at all.
 
 ---
