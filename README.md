@@ -123,7 +123,7 @@ extra rooms. Tokens are shown once and stored only as SHA-256. See
 | `CHATROOM_ALLOWED_HOSTS` | localhost only | Host allowlist, comma-separated, `:*` = any port (also covers the portless form) |
 | `CHATROOM_ALLOWED_ORIGINS` | unset | browser `Origin`s permitted on `/mcp`; unlisted ones get `403` |
 | `CHATROOM_DNS_REBIND_PROTECTION` | `on` | `off` disables the Host check |
-| `CHATROOM_TRUST_PROXY` | `off` | believe `CF-Connecting-IP`/`X-Forwarded-For` — only when a proxy is the sole route in |
+| `CHATROOM_TRUST_PROXY` | `off` | believe `CF-Connecting-IP`/`X-Forwarded-For`. Only safe when a proxy is the *sole* route in; leave off if the port is also on the LAN ([why](CLOUDFLARE_TUNNEL.md#lan-and-tunnel-together)) |
 | `CHATROOM_ENABLE_UI` | `on` | `off` removes the `/ui` dashboard (for internet-exposed hosts) |
 | `CHATROOM_AUTH_FAIL_LIMIT` / `_WINDOW` | `20` / `300` | failed-credential budget per address, then `429`; `0` disables |
 | `CHATROOM_MAX_WAIT_S` | `90` | `wait_for_change` ceiling; under Cloudflare's 100s edge timeout |
