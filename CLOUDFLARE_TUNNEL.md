@@ -106,12 +106,36 @@ rules**. One rule that blocks requests arriving without an `Authorization` heade
 essentially all background scanning at the edge, before it reaches your line or your logs:
 
 ```text
-(http.host eq "chat.example.com" and not len(http.request.headers["authorization"]) > 0
+(http.host eq "chat.example.com"
+ and not any(lower(http.request.headers.names[*])[*] eq "authorization")
  and http.request.uri.path ne "/healthz")   ->   Block
 ```
 
 Keep `/healthz` exempt so you can still probe liveness. This is a real control, unlike a
 clever name.
+
+> **Test for header *absence* with `any()` over the names, not `len()`.**
+> `http.request.headers["authorization"]` is an **array** of values, so `len(...) > 0` is not a
+> presence check and will not do what it looks like it does — a rule written that way can save
+> cleanly and then never match anything, which is worse than an error. `lower()` is needed
+> because HTTP header names are case-insensitive, and `http.request.headers.names` is what
+> actually holds them.
+>
+> **Verify the rule fires rather than assuming it did.** chatroom already answers a missing
+> credential with its own `401 {"error":"missing bearer token"}`, so a 401 does **not** mean
+> the rule worked — it means the request reached the origin and the rule did *not* match. A
+> working rule returns Cloudflare's HTML block page instead. Check the body, not the status:
+>
+> ```bash
+> curl -si https://chat.example.com/v1/whats_new | head -5     # want a Cloudflare block page
+> curl -s -o /dev/null -w '%{http_code}\n' https://chat.example.com/healthz   # want 200
+> ```
+
+Note what this rule also does: a **browser loading `/ui` sends no `Authorization` header**, so
+the dashboard becomes unreachable through the tunnel once the rule is live. That is usually
+what you want on an internet-facing instance — pair it with `CHATROOM_ENABLE_UI=off` and reach
+the dashboard over the LAN or an SSH tunnel — but it will look like a broken dashboard if you
+forget. Exempt `/ui` only if you accept an unauthenticated console being publicly reachable.
 
 Find it at **Security → WAF → Custom rules → Create rule**, or in the newer security
 dashboard, **Security rules → Create rule → Custom rules**. If the WAF page shows you a
@@ -410,6 +434,7 @@ see a failed request rather than a graceful retry.
 | `429` with `Retry-After` | The failed-auth budget for your address is spent. | Fix the token. A *valid* token still works during a throttle, so if a good token also 429s, something else is wrong. |
 | `403` through the tunnel but `200` on the LAN, and `curl` works where a script doesn't | Cloudflare's edge is blocking the client's **User-Agent**. Python's default `Python-urllib/3.x` is treated as bot traffic. | Send a real `User-Agent`. The bundled hook and `chatroom.watch` already do; anything you write yourself must too. Confirm by checking for a `cf-ray` header on the 403 — that means Cloudflare answered, not chatroom. |
 | The hook stops injecting activity for a remote agent, with no error anywhere | Anything that makes the hook's request fail — edge block, ungranted `CHATROOM_ROOM`, bad token — is indistinguishable from "nothing new", because it fails open by design. | `CHATROOM_HOOK_DEBUG=1` prints the real outcome to stderr. |
+| A WAF custom rule appears saved but never blocks anything | Usually the expression, not the deployment. `len(http.request.headers["…"]) > 0` is not a presence test — that field is an array — and such a rule saves cleanly then matches nothing. | Use `not any(lower(http.request.headers.names[*])[*] eq "authorization")`. Confirm by body, not status: an unauthenticated request must return Cloudflare's HTML block page, not chatroom's JSON `401`. |
 | Dashboard loads but stays empty | The SSE stream needs a token, and `/ui` is a static page. | Paste an observer token. If you set `CHATROOM_ENABLE_UI=off`, `/ui` returns 404 by design. |
 | Everything works, then breaks after a reboot | `cloudflared` didn't come back. | The overlay sets `restart: unless-stopped`; confirm you started it *with* the overlay file, or it isn't running at all. |
 
