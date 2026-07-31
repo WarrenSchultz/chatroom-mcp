@@ -21,6 +21,7 @@ because that choice is the whole reason the rest of this page is written the way
 - [Point clients at it](#point-clients-at-it)
 - [Why no Access, and what that costs you](#why-no-access-and-what-that-costs-you)
 - [Hardening checklist](#hardening-checklist)
+- [Rotating the tunnel token](#rotating-the-tunnel-token)
 - [Troubleshooting](#troubleshooting)
 - [Testing without a domain](#testing-without-a-domain-quick-tunnels)
 
@@ -300,6 +301,9 @@ Worth doing whenever the tunnel is what makes this server reachable:
       unaffected — but bad credentials get a cheap `429` and a log line you can grep.
 - [ ] **One token per machine, and revoke rather than reuse.** `admin revoke --agent NAME`
       kills all of that agent's tokens; mint a fresh one for the replacement.
+- [ ] **Rotate the tunnel token if it is ever exposed** — see
+      [Rotating the tunnel token](#rotating-the-tunnel-token). Note that rotating does not
+      disconnect connectors that are already attached; that needs a separate API call.
 - [ ] **Set retention** on rooms that accumulate chat or files:
       `admin set-retention --room <room> --days 30`. Less history is less to lose.
 - [ ] **Prefer scoped tokens.** Skip `--all-rooms` for anything that lives off-site; give a
@@ -315,6 +319,64 @@ Worth doing whenever the tunnel is what makes this server reachable:
 - [ ] **Optional: a free WAF rate-limit rule.** Cloudflare's free plan includes one rate
       limiting rule — scoping it to your hostname caps abuse at the edge, before it uses
       your bandwidth at all.
+
+---
+
+## Rotating the tunnel token
+
+The token authorises a tunnel into this network, so rotate it if it is ever pasted somewhere
+it shouldn't be — a chat window, a screenshot, a terminal recording, a ticket.
+
+**Dashboard:** **Networking → Tunnels** → select the tunnel → **Rotate token**. Then
+**Add replica** to reveal the new install command; the token is the long `eyJ...` argument at
+the end. (The dashboard shows the token when you first create a tunnel and *not* afterwards,
+which is why re-reading it means going through Add replica.)
+
+**Then update this side.** The `cloudflared service install` steps in that command do not apply
+to the container setup — only `.env` changes:
+
+```bash
+# edit .env and replace CLOUDFLARE_TUNNEL_TOKEN=..., or keep it off-screen and out of
+# shell history with a silent read:
+read -rsp 'New tunnel token: ' NEWTOK && echo
+python3 - "$NEWTOK" <<'PY'
+import pathlib, re, sys
+p = pathlib.Path(".env")
+p.write_text(re.sub(r"(?m)^CLOUDFLARE_TUNNEL_TOKEN=.*$",
+                    "CLOUDFLARE_TUNNEL_TOKEN=" + sys.argv[1], p.read_text()))
+p.chmod(0o600)
+PY
+unset NEWTOK
+docker compose -f docker-compose.yml -f docker-compose.cloudflared.yml up -d cloudflared
+docker logs chatroom-cloudflared 2>&1 | tail -5      # expect fresh Registered tunnel connection
+```
+
+**Rotation alone does not disconnect anyone.** A new token blocks *new* connections, but
+connectors already attached stay up until they restart — so if you are rotating because the
+token leaked, also force-disconnect every active connection:
+
+```bash
+# account and tunnel id are both encoded in the token you already have, so there is
+# nothing to look up in the dashboard:
+eval "$(python3 - <<'PY'
+import base64, json, re
+t = re.search(r"(?m)^CLOUDFLARE_TUNNEL_TOKEN=(\S+)", open(".env").read()).group(1)
+d = json.loads(base64.urlsafe_b64decode(t + "=" * (-len(t) % 4)))
+print(f'ACCOUNT_ID={d["a"]}; TUNNEL_ID={d["t"]}')
+PY
+)"
+curl -sX DELETE \
+  "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/cfd_tunnel/$TUNNEL_ID/connections" \
+  -H "Authorization: Bearer <CLOUDFLARE_API_TOKEN>"
+```
+
+That `<CLOUDFLARE_API_TOKEN>` is a normal Cloudflare API token (My Profile → API Tokens), not
+the tunnel token, and needs **Cloudflare Tunnel Write** (or *Cloudflare One Connectors Write*).
+The same `GET .../cfd_tunnel/$TUNNEL_ID/token` endpoint returns the current token if you would
+rather script retrieval than click through Add replica.
+
+Rotate outside working hours where you can: replicas drop as they restart, and agents mid-call
+see a failed request rather than a graceful retry.
 
 ---
 
