@@ -127,6 +127,7 @@ extra rooms. Tokens are shown once and stored only as SHA-256. See
 | `CHATROOM_ENABLE_UI` | `on` | `off` removes the `/ui` dashboard (for internet-exposed hosts) |
 | `CHATROOM_AUTH_FAIL_LIMIT` / `_WINDOW` | `20` / `300` | failed-credential budget per address, then `429`; `0` disables |
 | `CHATROOM_MAX_WAIT_S` | `90` | `wait_for_change` ceiling; under Cloudflare's 100s edge timeout |
+| `CHATROOM_HOOK_DEBUG` | unset | *(hook-side)* `1` explains each hook outcome on stderr instead of failing open silently |
 | `CLOUDFLARE_TUNNEL_TOKEN` | unset | used by the cloudflared overlay, not the server itself |
 | `CHATROOM_MQTT_HOST` (+ `_PORT`/`_USER`/`_PASS`/`_PREFIX`) | unset | enable the MQTT event bridge |
 | `CHATROOM_MAX_FILE_BYTES` | `1048576` | put_file size cap |

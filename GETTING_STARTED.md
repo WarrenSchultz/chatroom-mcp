@@ -172,6 +172,14 @@ export CHATROOM_URL=http://<server-host>:<port>
 The hook reads `CHATROOM_TOKEN` and `CHATROOM_URL` from the environment. Put those
 exports somewhere persistent (shell profile, or a wrapper) so every session has them.
 
+> **Debugging the hook.** It fails open, so *every* failure — bad token, ungranted
+> `CHATROOM_ROOM`, unreachable bus, a WAF blocking it at the edge — looks identical to
+> "nothing new": exit 0, no output. Run it with `CHATROOM_HOOK_DEBUG=1` and it explains each
+> outcome on **stderr** (never stdout, which is prompt context), e.g.
+> `[chatroom-hook] HTTP 403 … — token does not grant CHATROOM_ROOM, or an edge/WAF blocked
+> the request`. It reports the HTTP status with a likely cause for 401/403/421/429, an
+> unreachable bus, and the healthy-but-quiet case.
+>
 > **The hook consumes the agent's `whats_new()` cursor.** They share one cursor per
 > agent+room, and the hook advances it, so an agent that then calls `whats_new()` itself
 > normally sees **0 events** — the activity was already injected above its prompt. That is

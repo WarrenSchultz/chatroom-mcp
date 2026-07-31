@@ -454,6 +454,53 @@ def main() -> int:
               any("cursor-sharing check" in m["body"]
                   for m in Agent(t_cursor).call("read_messages")["messages"]))
 
+        # Fail-open makes "misconfigured" and "nothing new" look identical, which cost real
+        # debugging time. CHATROOM_HOOK_DEBUG must tell them apart on stderr, never stdout —
+        # stdout is prepended to the agent's prompt, so a diagnostic there becomes context.
+        def run_hook(env_extra):
+            # Drop any inherited CHATROOM_ROOM first, then apply the case's overrides —
+            # the operator's own shell may well have it set, which would silently change
+            # which room each case exercises.
+            e = {k: v for k, v in os.environ.items() if k != "CHATROOM_ROOM"}
+            e["CHATROOM_URL"] = BASE
+            e.update(env_extra)
+            return subprocess.run(
+                [sys.executable, str(ROOT / "hooks" / "chatroom_whats_new.py")],
+                capture_output=True, text=True, env=e)
+
+        t_dbg = mint("hookdebug", "projA")
+        box1.call("post_message", {"body": "activity for the debug-flag check"})
+        d1 = run_hook({"CHATROOM_TOKEN": t_dbg, "CHATROOM_HOOK_DEBUG": "1"})
+        check("debug reports HTTP 200 and the event count on stderr",
+              "HTTP 200" in d1.stderr and "events=" in d1.stderr, d1.stderr[:200])
+        check("debug does not contaminate stdout (stdout is prompt context)",
+              "[chatroom-hook]" not in d1.stdout, d1.stdout[:200])
+        d2 = run_hook({"CHATROOM_TOKEN": t_dbg, "CHATROOM_HOOK_DEBUG": "1"})
+        check("debug distinguishes a healthy quiet room from a failure",
+              "nothing unread" in d2.stderr, d2.stderr[:200])
+        d3 = run_hook({"CHATROOM_TOKEN": t_dbg, "CHATROOM_HOOK_DEBUG": "1",
+                       "CHATROOM_ROOM": "projB"})
+        check("debug explains an ungranted CHATROOM_ROOM instead of failing silently",
+              "403" in d3.stderr and "does not grant" in d3.stderr, d3.stderr[:250])
+        d4 = run_hook({"CHATROOM_TOKEN": "cr_bogus_debug", "CHATROOM_HOOK_DEBUG": "1"})
+        check("debug reports 401 for a bad token", "401" in d4.stderr, d4.stderr[:200])
+        d5 = run_hook({"CHATROOM_TOKEN": t_dbg, "CHATROOM_HOOK_DEBUG": "1",
+                       "CHATROOM_URL": "http://127.0.0.1:9"})
+        check("debug reports an unreachable bus", "cannot reach" in d5.stderr, d5.stderr[:200])
+        quiet = run_hook({"CHATROOM_TOKEN": "cr_bogus_debug"})
+        check("with debug off, failures stay silent on both streams",
+              quiet.stderr.strip() == "" and quiet.stdout.strip() == "",
+              f"out={quiet.stdout[:80]} err={quiet.stderr[:80]}")
+        check("every debug path still exits 0 (fail-open preserved)",
+              all(r.returncode == 0 for r in (d1, d2, d3, d4, d5, quiet)),
+              str([r.returncode for r in (d1, d2, d3, d4, d5, quiet)]))
+        # The explicit User-Agent is what keeps a WAF/edge from silently 403ing the hook.
+        hook_src = (ROOT / "hooks" / "chatroom_whats_new.py").read_text()
+        check("hook sends an explicit User-Agent, not urllib's default",
+              '"User-Agent"' in hook_src and "chatroom-hook/" in hook_src)
+        check("terminal watcher sends one too",
+              '"User-Agent"' in (ROOT / "chatroom" / "watch.py").read_text())
+
         print("\n--- revocation ---")
         subprocess.run([sys.executable, "-m", "chatroom.admin", "revoke", "--agent", "box2"],
                        cwd=ROOT, env=env, capture_output=True)

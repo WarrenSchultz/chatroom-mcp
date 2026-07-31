@@ -101,18 +101,31 @@ let them in, and the failed-auth throttle makes knocking cheap for you and point
 If your threat model needs the *endpoint* hidden rather than just the credential strong, a
 hostname is the wrong tool — use Access with service tokens, or a VPN/WireGuard path instead.
 
-**A better free lever than obscurity.** The Cloudflare free plan includes 5 WAF custom rules.
-One rule that blocks requests arriving without an `Authorization` header stops essentially all
-background scanning at the edge, before it reaches your line or your logs:
+**A better free lever than obscurity.** The Cloudflare **Free** plan includes **5 WAF custom
+rules**. One rule that blocks requests arriving without an `Authorization` header stops
+essentially all background scanning at the edge, before it reaches your line or your logs:
 
 ```text
 (http.host eq "chat.example.com" and not len(http.request.headers["authorization"]) > 0
  and http.request.uri.path ne "/healthz")   ->   Block
 ```
 
-Keep `/healthz` exempt so you can still probe liveness, and drop the `/ui` exemption entirely
-if you set `CHATROOM_ENABLE_UI=off`. This is a real control, unlike a clever name.
+Keep `/healthz` exempt so you can still probe liveness. This is a real control, unlike a
+clever name.
 
+Find it at **Security → WAF → Custom rules → Create rule**, or in the newer security
+dashboard, **Security rules → Create rule → Custom rules**. If the WAF page shows you a
+**"purchase add-on"** prompt, that is for **Managed Rules** (the curated OWASP/Cloudflare
+rulesets), which *is* a paid upgrade — custom rules are a separate, included feature, so look
+for the Custom rules tab rather than assuming the whole page is gated.
+
+> **Rate limiting is much weaker on Free than it looks.** The Free plan gets one rate limiting
+> rule, but it can only match on **Path** and **Verified Bot** and counts over a 10-second
+> window — it cannot match on `http.host`, so on a multi-hostname zone you cannot scope it to
+> just this service. Matching on Host, method, or User-Agent starts at Pro/Business. Treat
+> rate limiting as unavailable for this purpose on Free and let the custom rule plus the
+> server's own failed-auth throttle do the work.
+>
 > Using a company domain also ties this service to your organisation in anyone's eyes who
 > finds it. If the rooms will carry client or project material, that is a conversation with
 > whoever owns your security posture, not just a naming decision — see
@@ -311,14 +324,16 @@ Worth doing whenever the tunnel is what makes this server reachable:
 - [ ] **Watch the logs.** `docker compose logs chatroom | grep 'auth failure'` is your
       intrusion signal. Background internet noise doesn't send bearer tokens, so repeated
       auth failures mean someone found the hostname and is trying.
-- [ ] **Block tokenless requests at the edge.** The free plan's WAF custom rules let you drop
+- [ ] **Block tokenless requests at the edge.** The Free plan's 5 WAF custom rules let you drop
       anything arriving without an `Authorization` header, which is all background scanning —
-      see [Choosing the hostname](#choosing-the-hostname) for the expression. Worth far more
-      than an unguessable hostname, which leaks through Certificate Transparency, passive DNS,
-      and wordlists no matter how clever it is.
-- [ ] **Optional: a free WAF rate-limit rule.** Cloudflare's free plan includes one rate
-      limiting rule — scoping it to your hostname caps abuse at the edge, before it uses
-      your bandwidth at all.
+      see [Choosing the hostname](#choosing-the-hostname) for the expression and where to find
+      it in the dashboard. Worth far more than an unguessable hostname, which leaks through
+      Certificate Transparency, passive DNS, and wordlists no matter how clever it is.
+      (Rate limiting rules are *not* a usable substitute on Free — see the same section.)
+- [ ] **Check your clients still work after adding edge rules.** Cloudflare rejects some
+      default library User-Agents outright, and this project's hook fails open, so an edge
+      block presents as peer activity silently never arriving. Verify with
+      `CHATROOM_HOOK_DEBUG=1` after any WAF or bot-management change.
 
 ---
 
@@ -393,6 +408,8 @@ see a failed request rather than a graceful retry.
 | **502 Bad Gateway** through the tunnel, fine locally | `cloudflared` can't reach the origin. | The route's **Service URL** must be `http://chatroom:8080` (container name, in-container port) — not `localhost:8090`, which inside the cloudflared container is itself. Probe it from a throwaway container on the same network (step 4). |
 | **524 Timeout** on `wait_for_change` | Cloudflare gives up on an origin response at ~100s. | Already handled: the long poll is capped at 90s (`CHATROOM_MAX_WAIT_S`). If you raised it above ~95, lower it. |
 | `429` with `Retry-After` | The failed-auth budget for your address is spent. | Fix the token. A *valid* token still works during a throttle, so if a good token also 429s, something else is wrong. |
+| `403` through the tunnel but `200` on the LAN, and `curl` works where a script doesn't | Cloudflare's edge is blocking the client's **User-Agent**. Python's default `Python-urllib/3.x` is treated as bot traffic. | Send a real `User-Agent`. The bundled hook and `chatroom.watch` already do; anything you write yourself must too. Confirm by checking for a `cf-ray` header on the 403 — that means Cloudflare answered, not chatroom. |
+| The hook stops injecting activity for a remote agent, with no error anywhere | Anything that makes the hook's request fail — edge block, ungranted `CHATROOM_ROOM`, bad token — is indistinguishable from "nothing new", because it fails open by design. | `CHATROOM_HOOK_DEBUG=1` prints the real outcome to stderr. |
 | Dashboard loads but stays empty | The SSE stream needs a token, and `/ui` is a static page. | Paste an observer token. If you set `CHATROOM_ENABLE_UI=off`, `/ui` returns 404 by design. |
 | Everything works, then breaks after a reboot | `cloudflared` didn't come back. | The overlay sets `restart: unless-stopped`; confirm you started it *with* the overlay file, or it isn't running at all. |
 

@@ -68,8 +68,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.room:
         url += "&room=" + urllib.parse.quote(args.room)
 
+    # Explicit User-Agent: urllib's default is treated as bot traffic by Cloudflare and
+    # most WAFs, so watching a bus published through a tunnel would 403 at the edge.
     req = urllib.request.Request(url, headers={
-        "Authorization": f"Bearer {args.token}", "Accept": "text/event-stream"})
+        "Authorization": f"Bearer {args.token}", "Accept": "text/event-stream",
+        "User-Agent": "chatroom-watch/1.0 (+https://github.com/WarrenSchultz/chatroom-mcp)"})
     try:
         resp = urllib.request.urlopen(req, timeout=None)
     except urllib.error.HTTPError as exc:
