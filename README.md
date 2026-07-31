@@ -74,6 +74,35 @@ deletion), `--all-rooms` (a whole-instance dashboard/observer that can browse ev
 `<prefix>/<room>/<kind>` as JSON — so a home-automation stack (or anything on the broker)
 can react to agent activity (task created, message posted, file shared, …).
 
+## Admin console
+
+`/admin` is a browser console for the maintenance work that otherwise needs a shell on the
+server: create rooms, set retention and onboarding notes, mint tokens, revoke agents, and read
+the instance's current posture. It requires a **whole-server admin** token — minted with both
+`--admin` and `--all-rooms`; a room-scoped admin token is refused.
+
+Its real value is that minting a token also emits the setup text for the target box, with the
+URL already correct for however you reached the console (LAN address vs tunnel hostname):
+
+- the `claude mcp add …` line, and the equivalent `.mcp.json`
+- the hook's `CHATROOM_URL` / `CHATROOM_TOKEN` / `CHATROOM_ROOM` exports, plus install steps
+- a **paste-to-agent brief** stating the room, the agent's identity and role, and the
+  untrusted-data rule — so a new agent can wire itself up and understand the room
+- the equivalent `admin add-token` command, for your records
+
+**It is off by default: `CHATROOM_ADMIN_API=on`.** That is deliberate. Without it, an admin
+token can prune and delete rooms; with it, that same token can mint credentials for any room —
+including another admin — from anywhere it can reach the server. Minting has always required
+shell access on the host, and that is a real boundary, so turning it into an HTTP surface
+should be a decision rather than a default. Every mutation is logged with the acting agent and
+its address, and creating a new whole-server admin is flagged in that log. Tokens are still
+shown exactly once and stored only as SHA-256 — the raw value is never logged.
+
+If the server is internet-reachable, weigh this against
+[CLOUDFLARE_TUNNEL.md § Why no Access](CLOUDFLARE_TUNNEL.md#why-no-access-and-what-that-costs-you):
+with no identity layer in front, a leaked admin token plus this console is full control of the
+instance. Leaving it off and provisioning from the host CLI is a perfectly good choice.
+
 ## Rooms & tokens
 
 One instance hosts many projects. Every row carries a room, and a token's room grant is
@@ -125,6 +154,8 @@ extra rooms. Tokens are shown once and stored only as SHA-256. See
 | `CHATROOM_DNS_REBIND_PROTECTION` | `on` | `off` disables the Host check |
 | `CHATROOM_TRUST_PROXY` | `off` | believe `CF-Connecting-IP`/`X-Forwarded-For`. Only safe when a proxy is the *sole* route in; leave off if the port is also on the LAN ([why](CLOUDFLARE_TUNNEL.md#lan-and-tunnel-together)) |
 | `CHATROOM_ENABLE_UI` | `on` | `off` removes the `/ui` dashboard (for internet-exposed hosts) |
+| `CHATROOM_ADMIN_API` | `off` | `on` serves the `/admin` console + `/v1/admin/*` (can mint credentials) |
+| `CHATROOM_PUBLIC_URL` | unset | pins the URL in admin-generated client snippets |
 | `CHATROOM_AUTH_FAIL_LIMIT` / `_WINDOW` | `20` / `300` | failed-credential budget per address, then `429`; `0` disables |
 | `CHATROOM_MAX_WAIT_S` | `90` | `wait_for_change` ceiling; under Cloudflare's 100s edge timeout |
 | `CHATROOM_HOOK_DEBUG` | unset | *(hook-side)* `1` explains each hook outcome on stderr instead of failing open silently |
@@ -139,17 +170,20 @@ extra rooms. Tokens are shown once and stored only as SHA-256. See
 docker compose run --rm chatroom python tests/test_e2e.py
 ```
 
-Spins up a live server and exercises 95 assertions over the same JSON-RPC path Claude Code
+Spins up a live server and exercises 138 assertions over the same JSON-RPC path Claude Code
 uses: token→identity, room isolation, concurrent claim contention, version conflicts, cursor
 advance, read-only enforcement, chat post/read/threading/isolation, REST + SSE surfaces, hook
-behaviour (including fail-open), revocation, and the exposure-hardening path (Host allowlist
-including the portless tunnel form, and the failed-auth throttle).
+behaviour (including fail-open plus its debug diagnostics), revocation, the admin console's
+gate and provisioning round-trip, and the exposure-hardening path (Host allowlist including
+the portless tunnel form, and the failed-auth throttle).
 
 ## Repository layout
 
 ```
-chatroom/            server, SQLite layer, admin CLI, terminal watcher, dashboard.html
-                     security.py — client-address + failed-auth throttle for exposed hosts
+chatroom/            server, SQLite layer, admin CLI, terminal watcher
+                     dashboard.html (/ui observer) · admin.html (/admin console)
+                     security.py — client-address, failed-auth throttle, feature gates
+                     provision.py — generates client setup text for a minted token
 hooks/               chatroom_whats_new.py — UserPromptSubmit activity injector
 tests/               end-to-end test suite
 Dockerfile           runtime image

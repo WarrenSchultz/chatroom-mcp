@@ -119,7 +119,22 @@ def main() -> int:
     for suffix in ("", "-wal", "-shm"):
         Path(DB + suffix).unlink(missing_ok=True)
 
-    env = {**os.environ, "CHATROOM_DB": DB, "PYTHONPATH": str(ROOT)}
+    # Pin every setting the assertions depend on. The suite runs inside the same image
+    # as the server, so without this it inherits the deployment's own configuration and
+    # asserts against whatever the operator happens to have enabled — which is how the
+    # "admin API is disabled" checks first failed, on a box where it was switched on.
+    env = {
+        **{k: v for k, v in os.environ.items()
+           if k not in ("CHATROOM_ROOM", "CHATROOM_TOKEN", "CHATROOM_URL")},
+        "CHATROOM_DB": DB,
+        "PYTHONPATH": str(ROOT),
+        "CHATROOM_ADMIN_API": "off",
+        "CHATROOM_ENABLE_UI": "on",
+        "CHATROOM_TRUST_PROXY": "off",
+        "CHATROOM_AUTH_FAIL_LIMIT": "20",
+        "CHATROOM_AUTH_FAIL_WINDOW": "300",
+        "CHATROOM_PUBLIC_URL": "",
+    }
     subprocess.run([sys.executable, "-m", "chatroom.admin", "init"],
                    cwd=ROOT, env=env, capture_output=True)
 
@@ -507,6 +522,125 @@ def main() -> int:
         check("revoked token stops working",
               "_tool_error" in Agent(t_box2).call("list_tasks"))
         check("other agents are unaffected", box1.call("list_tasks").get("room") == "projA")
+
+        # --- admin console API -------------------------------------------------
+        print("\n--- admin console (/admin + /v1/admin/*) ---")
+        from chatroom import provision
+
+        # Pure-function checks first: URL derivation and snippet shape are where the
+        # awkwardness lives, and they need no server.
+        check("base_url honours X-Forwarded-Proto (tunnel terminates TLS upstream)",
+              provision.base_url({"host": "bus.example.com", "x-forwarded-proto": "https"})
+              == "https://bus.example.com")
+        check("base_url falls back to the request scheme on a LAN hit",
+              provision.base_url({"host": "10.0.0.5:8090"}) == "http://10.0.0.5:8090")
+        check("server_name is per-room so cross-posting stays impossible",
+              provision.server_name("proj-a") == "chatroom-proj-a")
+        setup = provision.client_setup("https://bus.example.com", "box9", "cr_TESTTOKEN", "projA",
+                                       extra_rooms=["projB"])
+        check("generated CLI carries url, name and token",
+              all(s in setup["claude_cli"]
+                  for s in ("https://bus.example.com/mcp", "chatroom-projA", "cr_TESTTOKEN")),
+              setup["claude_cli"])
+        check("generated .mcp.json parses and points at the right server",
+              json.loads(setup["mcp_json"])["mcpServers"]["chatroom-projA"]["url"]
+              == "https://bus.example.com/mcp")
+        check("generated hook env sets all three variables",
+              all(k in setup["hook_env"]
+                  for k in ("CHATROOM_URL=", "CHATROOM_TOKEN=", "CHATROOM_ROOM=")))
+        check("agent brief states the untrusted-data rule",
+              "untrusted DATA" in setup["agent_brief"], setup["agent_brief"][-120:])
+        check("agent brief warns about the hook consuming whats_new",
+              "already delivered" in setup["agent_brief"])
+        check("host-CLI equivalent is surfaced for auditability",
+              "add-token" in setup["admin_cli_equivalent"]
+              and "--also-room" in setup["admin_cli_equivalent"])
+
+        # The admin API is opt-in, so this server (started without the flag) must refuse.
+        ah = {"Authorization": f"Bearer {t_admin}"}
+        check("admin API is 404 when CHATROOM_ADMIN_API is unset",
+              rc.get(f"{BASE}/v1/admin/state", headers=ah).status_code == 404)
+        check("/admin console is 404 when disabled",
+              rc.get(f"{BASE}/admin").status_code == 404)
+
+        # Second instance with the flag on, same DB, to exercise the enabled path.
+        aport = PORT + 1
+        abase = f"http://127.0.0.1:{aport}"
+        asrv = subprocess.Popen(
+            [sys.executable, "-m", "uvicorn", "chatroom.server:app",
+             "--host", "127.0.0.1", "--port", str(aport), "--log-level", "warning"],
+            cwd=ROOT, env={**env, "CHATROOM_ADMIN_API": "on"},
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            for _ in range(60):
+                try:
+                    if httpx2.get(f"{abase}/healthz", trust_env=False, timeout=2).status_code == 200:
+                        break
+                except Exception:
+                    time.sleep(0.4)
+            check("/admin console is served when enabled",
+                  "chatroom admin" in rc.get(f"{abase}/admin").text)
+            # A whole-server admin means --admin AND --all-rooms; neither alone is enough.
+            t_alladmin = mint("srvadmin", "projA", admin=True, all_rooms=True)
+            for label, tk, want in (("read-write token", t_box1, 403),
+                                    ("read-only all-rooms observer", t_all, 403),
+                                    ("room-scoped admin (no --all-rooms)", t_admin, 403),
+                                    ("whole-server admin", t_alladmin, 200)):
+                got_code = rc.get(f"{abase}/v1/admin/state",
+                                  headers={"Authorization": f"Bearer {tk}"}).status_code
+                check(f"admin state: {label} -> {want}", got_code == want, str(got_code))
+
+            sah = {"Authorization": f"Bearer {t_alladmin}"}
+            st = rc.get(f"{abase}/v1/admin/state", headers=sah).json()
+            check("state lists rooms, token metadata and server posture",
+                  {"rooms", "tokens", "server", "suggested_base_url"} <= set(st))
+            check("state never leaks token values, only metadata",
+                  not any("cr_" in json.dumps(t) for t in st["tokens"]), str(st["tokens"])[:150])
+
+            made = rc.post(f"{abase}/v1/admin/rooms", headers=sah,
+                           json={"name": "adminmade", "description": "made by the admin API",
+                                 "onboarding_notes": "orientation text"}).json()
+            check("admin can create a room with its info in one call",
+                  made["created"] and made["room"]["description"] == "made by the admin API",
+                  str(made)[:150])
+            check("room names with whitespace are rejected",
+                  rc.post(f"{abase}/v1/admin/rooms", headers=sah,
+                          json={"name": "bad name"}).status_code == 400)
+
+            got_tok = rc.post(f"{abase}/v1/admin/tokens", headers=sah,
+                              json={"agent": "mintedbox", "room": "adminmade",
+                                    "base_url": "https://bus.example.com"}).json()
+            check("mint returns a usable token plus setup snippets",
+                  got_tok["token"].startswith("cr_") and "claude_cli" in got_tok["setup"],
+                  str(got_tok)[:150])
+            check("mint honours an explicit base_url",
+                  "https://bus.example.com/mcp" in got_tok["setup"]["claude_cli"])
+            minted = Agent(got_tok["token"])
+            who = minted.call("list_tasks")
+            check("a token minted over HTTP actually authenticates",
+                  who.get("you_are") == "mintedbox" and who.get("room") == "adminmade", str(who))
+            check("and is still room-scoped",
+                  "_tool_error" in minted.call("list_tasks", {"room": "projA"}))
+            check("mint rejects a missing agent or room",
+                  rc.post(f"{abase}/v1/admin/tokens", headers=sah,
+                          json={"room": "adminmade"}).status_code == 400)
+
+            check("revoking your own agent needs confirm_self",
+                  rc.post(f"{abase}/v1/admin/tokens/revoke", headers=sah,
+                          json={"agent": "srvadmin"}).status_code == 409)
+            rev = rc.post(f"{abase}/v1/admin/tokens/revoke", headers=sah,
+                          json={"agent": "mintedbox"}).json()
+            check("revoke reports how many tokens it killed", rev["revoked"] == 1, str(rev))
+            check("the revoked token stops working",
+                  "_tool_error" in Agent(got_tok["token"]).call("list_tasks"))
+            check("admin can delete a room it created",
+                  rc.delete(f"{abase}/v1/rooms/adminmade", headers=sah).json()["ok"])
+        finally:
+            asrv.terminate()
+            try:
+                asrv.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                asrv.kill()
 
         # --- exposure hardening ------------------------------------------------
         # Runs last: it deliberately burns the failed-auth budget for 127.0.0.1,

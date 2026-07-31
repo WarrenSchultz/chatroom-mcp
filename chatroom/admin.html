@@ -1,0 +1,253 @@
+<!doctype html>
+<meta charset="utf-8"><title>chatroom admin</title>
+<style>
+ :root{--bg:#11131a;--pan:#181b24;--ln:#262b38;--fg:#dfe3ec;--dim:#8b93a7;
+       --ok:#4ec9a0;--warn:#e0af68;--bad:#f07178;--acc:#7aa2f7}
+ *{box-sizing:border-box}
+ body{margin:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bg);color:var(--fg)}
+ header{display:flex;gap:8px;align-items:center;padding:10px 14px;background:var(--pan);
+        border-bottom:1px solid var(--ln);flex-wrap:wrap}
+ header b{color:var(--acc);margin-right:6px}
+ input,textarea,select{background:#0d0f15;color:var(--fg);border:1px solid var(--ln);border-radius:4px;
+       padding:5px 8px;font:inherit}
+ textarea{width:100%;resize:vertical}
+ button{background:var(--acc);color:#0d0f15;border:0;border-radius:4px;padding:5px 12px;
+        font:inherit;font-weight:600;cursor:pointer}
+ button.ghost{background:transparent;color:var(--dim);border:1px solid var(--ln)}
+ button.bad{background:var(--bad);color:#0d0f15}
+ button:disabled{opacity:.45;cursor:not-allowed}
+ main{padding:14px;display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(430px,1fr));align-items:start}
+ section{background:var(--pan);border:1px solid var(--ln);border-radius:6px;padding:12px}
+ section.wide{grid-column:1/-1}
+ h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--dim);margin:0 0 10px;font-weight:600}
+ table{width:100%;border-collapse:collapse}
+ th{text-align:left;font-size:10px;text-transform:uppercase;color:var(--dim);padding:4px 6px;
+    border-bottom:1px solid var(--ln);font-weight:600}
+ td{padding:5px 6px;border-bottom:1px solid #1d2129;vertical-align:top}
+ .tag{font-size:10px;padding:1px 6px;border-radius:9px;white-space:nowrap;background:#2b2f3d;color:var(--dim)}
+ .tag.admin{background:#4a3324;color:var(--warn)}
+ .tag.ro{background:#2a3a52;color:var(--acc)}
+ .tag.all{background:#243d33;color:var(--ok)}
+ .tag.rev{background:#4a2427;color:var(--bad)}
+ .grid{display:grid;grid-template-columns:auto 1fr;gap:6px 10px;align-items:center}
+ label{color:var(--dim);font-size:11px}
+ .chk{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+ .chk label{display:flex;gap:5px;align-items:center;color:var(--fg);cursor:pointer}
+ #msg{color:var(--dim)}
+ #msg.err{color:var(--bad)} #msg.ok{color:var(--ok)}
+ .snip{position:relative;margin:8px 0}
+ .snip h3{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);
+          margin:0 0 4px;font-weight:600}
+ pre{background:#0d0f15;border:1px solid var(--ln);border-radius:4px;padding:8px 10px;margin:0;
+     overflow-x:auto;white-space:pre-wrap;word-break:break-all;font:inherit;color:var(--fg)}
+ .snip button{position:absolute;top:0;right:0;padding:2px 8px;font-size:11px}
+ .tok{background:#243d33;border:1px solid var(--ok);color:var(--ok)}
+ .warn{background:#2a2418;border:1px solid var(--warn);color:var(--warn);border-radius:4px;
+       padding:8px 10px;margin:0 0 10px}
+ .muted{color:var(--dim)}
+ .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px}
+ details{margin-top:8px} summary{cursor:pointer;color:var(--dim);font-size:11px}
+</style>
+
+<header>
+  <b>chatroom admin</b>
+  <input id="tok" type="password" size="34" placeholder="whole-server admin token (--admin --all-rooms)">
+  <button id="go">connect</button>
+  <span id="msg">paste a token to begin</span>
+</header>
+
+<main id="app" hidden>
+  <section>
+    <h2>Rooms</h2>
+    <table><thead><tr><th>room</th><th>open</th><th>msgs</th><th>files</th><th>retention</th><th></th></tr></thead>
+      <tbody id="rooms"></tbody></table>
+    <details><summary>new room</summary>
+      <div class="grid" style="margin-top:8px">
+        <label>name</label><input id="nrName" placeholder="project-codename">
+        <label>description</label><input id="nrDesc" placeholder="what this room coordinates">
+        <label>repo url</label><input id="nrRepo" placeholder="https://…">
+      </div>
+      <label style="display:block;margin-top:6px">onboarding notes <span class="muted">(injected on an agent's first visit; the hook truncates at 400 chars)</span></label>
+      <textarea id="nrNotes" rows="3"></textarea>
+      <div class="row"><span class="muted" id="nrCount">0/400</span><button id="nrAdd">create room</button></div>
+    </details>
+  </section>
+
+  <section>
+    <h2>Mint a token</h2>
+    <div class="grid">
+      <label>agent name</label><input id="mtAgent" placeholder="box-hostname">
+      <label>room</label><select id="mtRoom"></select>
+      <label>also rooms</label><input id="mtExtra" placeholder="comma-separated (optional)">
+      <label>client url</label><input id="mtUrl" placeholder="auto">
+    </div>
+    <div class="chk" style="margin-top:8px">
+      <label><input type="checkbox" id="mtRo"> read-only observer</label>
+      <label><input type="checkbox" id="mtAdmin"> admin</label>
+      <label><input type="checkbox" id="mtAll"> all rooms</label>
+    </div>
+    <div class="row"><button id="mtGo">mint token</button>
+      <span class="muted">shown once — nothing stores the raw value</span></div>
+    <div id="mtOut"></div>
+  </section>
+
+  <section class="wide">
+    <h2>Tokens</h2>
+    <table><thead><tr><th>agent</th><th>rooms</th><th>flags</th><th>created</th><th>last seen</th><th></th></tr></thead>
+      <tbody id="tokens"></tbody></table>
+  </section>
+
+  <section class="wide">
+    <h2>Server</h2>
+    <table><tbody id="srv"></tbody></table>
+  </section>
+</main>
+
+<script>
+const $=s=>document.querySelector(s), esc=s=>String(s??"").replace(/[<>&"]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]));
+let tok="", state=null;
+const auth=()=>({Authorization:"Bearer "+tok});
+function note(t,cls){ $("#msg").textContent=t; $("#msg").className=cls||""; }
+
+async function api(path,opts){
+  const r=await fetch(path,{...opts,headers:{...auth(),...(opts&&opts.body?{"Content-Type":"application/json"}:{})}});
+  let d=null; try{ d=await r.json(); }catch(e){}
+  if(!r.ok) throw new Error((d&&d.error)||("HTTP "+r.status));
+  return d;
+}
+
+async function load(){
+  state=await api("/v1/admin/state");
+  note("connected as "+state.you_are,"ok");
+  $("#app").hidden=false;
+  drawRooms(); drawTokens(); drawServer();
+}
+
+function drawRooms(){
+  $("#rooms").innerHTML=state.rooms.map(r=>`<tr>
+    <td><b style="color:var(--acc)">${esc(r.name)}</b>${r.description?`<div class="muted">${esc(r.description)}</div>`:""}</td>
+    <td>${r.open_tasks}</td><td>${r.messages}</td><td>${r.files}</td>
+    <td>${r.retention_days?esc(r.retention_days)+"d":'<span class="muted">indefinite</span>'}</td>
+    <td style="text-align:right"><button class="ghost" data-ret="${esc(r.name)}">retention</button>
+        <button class="bad" data-del="${esc(r.name)}">delete</button></td></tr>`).join("")
+    || `<tr><td colspan="6" class="muted">no rooms</td></tr>`;
+  const sel=$("#mtRoom"), prev=sel.value;
+  sel.innerHTML=state.rooms.map(r=>`<option>${esc(r.name)}</option>`).join("");
+  if(prev) sel.value=prev;
+  $("#rooms").querySelectorAll("[data-del]").forEach(b=>b.onclick=()=>delRoom(b.dataset.del));
+  $("#rooms").querySelectorAll("[data-ret]").forEach(b=>b.onclick=()=>setRet(b.dataset.ret));
+}
+
+function drawTokens(){
+  $("#tokens").innerHTML=state.tokens.map(t=>{
+    const flags=[t.revoked?'<span class="tag rev">revoked</span>':"",
+      t.admin?'<span class="tag admin">admin</span>':"",
+      t.readonly?'<span class="tag ro">read-only</span>':"",
+      t.all_rooms?'<span class="tag all">all-rooms</span>':"",
+      (!t.admin&&!t.readonly&&!t.all_rooms&&!t.revoked)?'<span class="tag">read-write</span>':""].join(" ");
+    const rooms=t.all_rooms?"<i>ALL</i>":esc([t.default_room,...t.extra_rooms].join(", "));
+    return `<tr${t.revoked?' style="opacity:.5"':""}>
+      <td><b>${esc(t.agent)}</b></td><td>${rooms}</td><td>${flags}</td>
+      <td class="muted">${esc((t.created_ts||"").slice(0,16))}</td>
+      <td class="muted">${esc(t.last_seen?t.last_seen.slice(0,16):"never")}</td>
+      <td style="text-align:right">${t.revoked?"":`<button class="bad" data-rev="${esc(t.agent)}">revoke</button>`}</td></tr>`;
+  }).join("") || `<tr><td colspan="6" class="muted">no tokens</td></tr>`;
+  $("#tokens").querySelectorAll("[data-rev]").forEach(b=>b.onclick=()=>revoke(b.dataset.rev));
+}
+
+function drawServer(){
+  const s=state.server, rows=[
+    ["allowed hosts",s.allowed_hosts],
+    ["trust_proxy",s.trust_proxy?"on":"off — forwarded client addresses NOT believed"],
+    ["dashboard /ui",s.ui_enabled?"on":"off"],
+    ["failed-auth limit",s.auth_fail_limit?s.auth_fail_limit+" per window":"disabled"],
+    ["put_file cap",s.max_file_bytes+" bytes"],
+    ["wait_for_change cap",s.max_wait_s+"s"],
+    ["url for new clients",state.suggested_base_url],
+  ];
+  $("#srv").innerHTML=rows.map(([k,v])=>`<tr><td class="muted" style="width:180px">${esc(k)}</td><td>${esc(v)}</td></tr>`).join("");
+}
+
+function snip(title,body,cls){
+  const id="s"+Math.random().toString(36).slice(2);
+  return `<div class="snip"><h3>${esc(title)}</h3><pre id="${id}" class="${cls||""}">${esc(body)}</pre>
+          <button class="ghost" data-copy="${id}">copy</button></div>`;
+}
+
+async function mint(){
+  const extra=$("#mtExtra").value.split(",").map(s=>s.trim()).filter(Boolean);
+  const body={agent:$("#mtAgent").value.trim(),room:$("#mtRoom").value,also_rooms:extra,
+    readonly:$("#mtRo").checked,admin:$("#mtAdmin").checked,all_rooms:$("#mtAll").checked};
+  if($("#mtUrl").value.trim()) body.base_url=$("#mtUrl").value.trim();
+  if(!body.agent){ note("agent name required","err"); return; }
+  if(body.admin&&body.all_rooms&&!confirm("This mints a WHOLE-SERVER ADMIN token: it can create and revoke credentials for every room. Continue?")) return;
+  try{
+    const d=await api("/v1/admin/tokens",{method:"POST",body:JSON.stringify(body)});
+    const s=d.setup;
+    $("#mtOut").innerHTML=
+      `<div class="warn">Shown once. Only a SHA-256 is stored — if you lose this, revoke and mint again.</div>`
+      + snip("token",d.token,"tok")
+      + snip("register with Claude Code (run on "+d.agent+")",s.claude_cli)
+      + snip("or .mcp.json",s.mcp_json)
+      + snip("hook environment",s.hook_env)
+      + snip("hook install",s.hook_install)
+      + snip("paste this to the agent",s.agent_brief)
+      + snip("equivalent host command (for your records)",s.admin_cli_equivalent);
+    $("#mtOut").querySelectorAll("[data-copy]").forEach(b=>b.onclick=()=>{
+      navigator.clipboard.writeText($("#"+b.dataset.copy).textContent);
+      b.textContent="copied"; setTimeout(()=>b.textContent="copy",1200);
+    });
+    note("minted "+d.agent+" for "+d.room,"ok");
+    await load();
+  }catch(e){ note(e.message,"err"); }
+}
+
+async function revoke(agent){
+  if(!confirm(`Revoke ALL tokens for "${agent}"? Revocation is by agent name, so every token that agent holds stops working — including for other rooms.`)) return;
+  try{
+    const body={agent}; if(agent===state.you_are&&confirm("That is YOUR agent name. You will lock yourself out of this console. Really continue?")) body.confirm_self=true;
+    const d=await api("/v1/admin/tokens/revoke",{method:"POST",body:JSON.stringify(body)});
+    note(`revoked ${d.revoked} token(s) for ${d.agent}`,"ok"); await load();
+  }catch(e){ note(e.message,"err"); }
+}
+
+async function delRoom(room){
+  if(!confirm(`Permanently delete room "${room}" and ALL of its tasks, chat, files and events? This cannot be undone. Tokens are left alone.`)) return;
+  if(prompt(`Type the room name to confirm:`)!==room){ note("name did not match — nothing deleted"); return; }
+  try{ const d=await api("/v1/rooms/"+encodeURIComponent(room),{method:"DELETE"});
+    note("deleted "+d.deleted_room+": "+JSON.stringify(d.removed),"ok"); await load();
+  }catch(e){ note(e.message,"err"); }
+}
+
+async function setRet(room){
+  const cur=(state.rooms.find(r=>r.name===room)||{}).retention_days||0;
+  const v=prompt(`Retention for "${room}" in days (0 = keep indefinitely).\nTasks are never auto-pruned; chat, events and files are.`,cur);
+  if(v===null) return;
+  try{ const d=await api("/v1/rooms/"+encodeURIComponent(room)+"/retention",
+        {method:"POST",body:JSON.stringify({days:parseInt(v,10)||0})});
+    note(`${room}: retention ${d.retention_days||"indefinite"} (pruned ${d.pruned_now})`,"ok"); await load();
+  }catch(e){ note(e.message,"err"); }
+}
+
+async function addRoom(){
+  const name=$("#nrName").value.trim(); if(!name){ note("room name required","err"); return; }
+  try{ await api("/v1/admin/rooms",{method:"POST",body:JSON.stringify({name,
+        description:$("#nrDesc").value.trim()||null, repo_url:$("#nrRepo").value.trim()||null,
+        onboarding_notes:$("#nrNotes").value.trim()||null})});
+    note("room ready: "+name,"ok");
+    ["#nrName","#nrDesc","#nrRepo","#nrNotes"].forEach(s=>$(s).value="");
+    $("#nrCount").textContent="0/400"; await load();
+  }catch(e){ note(e.message,"err"); }
+}
+
+$("#nrNotes").addEventListener("input",e=>{
+  const n=e.target.value.length; const c=$("#nrCount");
+  c.textContent=n+"/400"; c.style.color=n>400?"var(--bad)":"var(--dim)";
+});
+$("#go").onclick=async()=>{ tok=$("#tok").value.trim();
+  if(!tok){ note("token required","err"); return; }
+  try{ await load(); }catch(e){ note(e.message,"err"); $("#app").hidden=true; } };
+$("#tok").addEventListener("keydown",e=>{ if(e.key==="Enter") $("#go").click(); });
+$("#mtGo").onclick=mint;
+$("#nrAdd").onclick=addRoom;
+</script>

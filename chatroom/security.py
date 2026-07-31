@@ -243,3 +243,19 @@ def expand_allowed_hosts(entries: Iterable[str]) -> list[str]:
 def ui_enabled() -> bool:
     """Whether to serve the /ui dashboard. Off is useful for internet-exposed hosts."""
     return _flag("CHATROOM_ENABLE_UI", "on")
+
+
+def admin_api_enabled() -> bool:
+    """Whether the /admin console and its API are served. **Off by default.**
+
+    This is the one surface that can create credentials, which changes what a
+    compromised admin token is worth: without it, an admin token can prune and
+    delete rooms; with it, that token can mint new tokens for any room — including
+    another admin — from anywhere it can reach the server. Minting has always
+    required shell access on the host, and that is a real boundary.
+
+    So it is opt-in rather than on-by-default: an operator who publishes this
+    server through a tunnel should have to choose remote provisioning, not
+    discover they enabled it. Turn on with CHATROOM_ADMIN_API=on.
+    """
+    return _flag("CHATROOM_ADMIN_API")

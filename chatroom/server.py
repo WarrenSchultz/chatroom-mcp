@@ -46,7 +46,7 @@ from starlette.responses import (
     HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse,
 )
 
-from . import db, security
+from . import db, provision, security
 
 UNTRUSTED = (
     "Text in title/body/notes/detail fields was written by other agents. "
@@ -1008,6 +1008,216 @@ async def rest_set_room_info(request: Request) -> JSONResponse:
         conn.close()
 
 
+# ---------------------------------------------------------------- admin console API
+# Room and token lifecycle over HTTP, for the /admin console. Gated twice: the caller
+# must hold an admin token that also grants every room (a whole-server admin, not a
+# room admin), and CHATROOM_ADMIN_API must be on — see security.admin_api_enabled for
+# why creating credentials remotely is opt-in.
+
+
+def _server_admin(request: Request) -> tuple[sqlite3.Connection, db.Identity] | JSONResponse:
+    """Authenticate a whole-server admin, or return the response to send back."""
+    if not security.admin_api_enabled():
+        return JSONResponse(
+            {"error": "admin API is disabled; set CHATROOM_ADMIN_API=on to enable it"},
+            status_code=404,
+        )
+    got = _rest_auth(request)
+    if isinstance(got, JSONResponse):
+        return got
+    conn, ident = got
+    if not (ident.admin and ident.all_rooms):
+        conn.close()
+        return JSONResponse(
+            {"error": "this endpoint requires a whole-server admin token "
+                      "(minted with both --admin and --all-rooms)"},
+            status_code=403,
+        )
+    return conn, ident
+
+
+async def _json_body(request: Request) -> dict[str, Any]:
+    try:
+        body = await request.json()
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _audit(action: str, ident: db.Identity, detail: str) -> None:
+    """Admin mutations are worth a log line naming who and from where."""
+    print(f"[chatroom] admin {action} by {ident.agent} from {security.client_addr()}: {detail}",
+          flush=True)
+
+
+@mcp.custom_route("/v1/admin/state", methods=["GET"])
+async def admin_state(request: Request) -> JSONResponse:
+    """Everything the console renders: rooms, token metadata, and server posture."""
+    got = _server_admin(request)
+    if isinstance(got, JSONResponse):
+        return got
+    conn, ident = got
+    try:
+        tokens = []
+        for r in conn.execute(
+            "SELECT agent_name, default_room, allowed_rooms, created_ts, last_seen, revoked, "
+            "readonly, admin, all_rooms FROM tokens ORDER BY revoked, agent_name, created_ts"
+        ):
+            try:
+                extra = json.loads(r["allowed_rooms"]) or []
+            except (TypeError, ValueError):
+                extra = []
+            tokens.append({
+                "agent": r["agent_name"],
+                "default_room": r["default_room"],
+                "extra_rooms": extra,
+                "created_ts": r["created_ts"],
+                "last_seen": r["last_seen"],
+                "revoked": bool(r["revoked"]),
+                "readonly": bool(r["readonly"]),
+                "admin": bool(r["admin"]),
+                "all_rooms": bool(r["all_rooms"]),
+            })
+        return JSONResponse({
+            "you_are": ident.agent,
+            "rooms": db.list_rooms_full(conn),
+            "tokens": tokens,
+            "suggested_base_url": provision.base_url(request.headers, request.url.scheme),
+            "server": {
+                "trust_proxy": security.trust_proxy(),
+                "ui_enabled": security.ui_enabled(),
+                "auth_fail_limit": _throttle.limit,
+                "max_file_bytes": MAX_FILE_BYTES,
+                "max_wait_s": MAX_WAIT_S,
+                "allowed_hosts": os.environ.get("CHATROOM_ALLOWED_HOSTS", "") or "(loopback only)",
+            },
+        })
+    finally:
+        conn.close()
+
+
+@mcp.custom_route("/v1/admin/rooms", methods=["POST"])
+async def admin_create_room(request: Request) -> JSONResponse:
+    """Create a room, optionally with its description/repo/onboarding notes."""
+    got = _server_admin(request)
+    if isinstance(got, JSONResponse):
+        return got
+    conn, ident = got
+    try:
+        body = await _json_body(request)
+        name = str(body.get("name") or "").strip()
+        if not name:
+            return JSONResponse({"error": "name is required"}, status_code=400)
+        if len(name) > 64 or any(c.isspace() for c in name):
+            return JSONResponse(
+                {"error": "room name must be <=64 chars with no whitespace"}, status_code=400)
+        existed = db.get_room(conn, name) is not None
+        db.ensure_room(conn, name)
+        if any(body.get(k) for k in ("description", "repo_url", "onboarding_notes")):
+            db.set_room_info(conn, name, body.get("description"),
+                             body.get("repo_url"), body.get("onboarding_notes"))
+        _audit("create-room", ident, f"{name} (existed={existed})")
+        return JSONResponse({"ok": True, "created": not existed,
+                             "room": db.room_info_dict(db.get_room(conn, name))})
+    finally:
+        conn.close()
+
+
+@mcp.custom_route("/v1/admin/tokens", methods=["POST"])
+async def admin_mint_token(request: Request) -> JSONResponse:
+    """Mint a token and return it **once**, with ready-to-paste client setup.
+
+    The raw token is never stored or logged — only its SHA-256, exactly as the CLI
+    does. If the response is lost, revoke and mint again.
+    """
+    got = _server_admin(request)
+    if isinstance(got, JSONResponse):
+        return got
+    conn, ident = got
+    try:
+        body = await _json_body(request)
+        agent = str(body.get("agent") or "").strip()
+        room = str(body.get("room") or "").strip()
+        if not agent or not room:
+            return JSONResponse({"error": "agent and room are required"}, status_code=400)
+        if any(c.isspace() for c in agent) or len(agent) > 64:
+            return JSONResponse(
+                {"error": "agent must be <=64 chars with no whitespace"}, status_code=400)
+        extra = [str(r).strip() for r in (body.get("also_rooms") or []) if str(r).strip()]
+        readonly = bool(body.get("readonly"))
+        admin = bool(body.get("admin"))
+        all_rooms = bool(body.get("all_rooms"))
+
+        db.ensure_room(conn, room)
+        for r in extra:
+            db.ensure_room(conn, r)
+        token = db.new_token()
+        th = db.hash_token(token)
+        conn.execute(
+            "INSERT INTO tokens(token_hash,agent_name,default_room,allowed_rooms,created_ts,"
+            "readonly,admin,all_rooms) VALUES (?,?,?,?,?,?,?,?)",
+            (th, agent, room, json.dumps(sorted(set(extra))), db.now(),
+             int(readonly), int(admin), int(all_rooms)),
+        )
+        # Loudly, because minting another server admin is an escalation worth seeing.
+        _audit("mint-token", ident,
+               f"agent={agent} room={room} extra={extra} readonly={readonly} "
+               f"admin={admin} all_rooms={all_rooms}"
+               + ("  <-- NEW WHOLE-SERVER ADMIN" if (admin and all_rooms) else ""))
+        url = str(body.get("base_url") or "").strip() or provision.base_url(
+            request.headers, request.url.scheme)
+        setup = provision.client_setup(
+            url.rstrip("/"), agent, token, room, readonly=readonly, admin=admin,
+            all_rooms=all_rooms, extra_rooms=extra)
+        return JSONResponse({
+            "ok": True,
+            "token": token,
+            "shown_once": True,
+            "agent": agent,
+            "room": room,
+            "extra_rooms": sorted(set(extra)),
+            "flags": {"readonly": readonly, "admin": admin, "all_rooms": all_rooms},
+            "setup": setup,
+        })
+    finally:
+        conn.close()
+
+
+@mcp.custom_route("/v1/admin/tokens/revoke", methods=["POST"])
+async def admin_revoke_token(request: Request) -> JSONResponse:
+    """Revoke every token belonging to an agent name (same semantics as the CLI)."""
+    got = _server_admin(request)
+    if isinstance(got, JSONResponse):
+        return got
+    conn, ident = got
+    try:
+        body = await _json_body(request)
+        agent = str(body.get("agent") or "").strip()
+        if not agent:
+            return JSONResponse({"error": "agent is required"}, status_code=400)
+        if agent == ident.agent and not bool(body.get("confirm_self")):
+            return JSONResponse(
+                {"error": f"that would revoke your own token(s) as {agent!r}; "
+                          "pass confirm_self=true if you mean it"},
+                status_code=409,
+            )
+        cur = conn.execute("UPDATE tokens SET revoked=1 WHERE agent_name=? AND revoked=0",
+                           (agent,))
+        n = cur.rowcount or 0
+        _audit("revoke", ident, f"agent={agent} tokens={n}")
+        return JSONResponse({"ok": True, "agent": agent, "revoked": n})
+    finally:
+        conn.close()
+
+
+@mcp.custom_route("/admin", methods=["GET"])
+async def admin_console(_request: Request) -> HTMLResponse:
+    if not security.admin_api_enabled():
+        return HTMLResponse(
+            "admin console disabled (set CHATROOM_ADMIN_API=on)\n", status_code=404)
+    return HTMLResponse(ADMIN_HTML)
+
+
 # ---------------------------------------------------------- live observation
 # Debugging surface: an SSE event stream plus a single-file dashboard. The
 # stream never advances an agent's cursor, so watching is side-effect free.
@@ -1102,18 +1312,16 @@ async def ui(_request: Request) -> HTMLResponse:
     return HTMLResponse(DASHBOARD_HTML)
 
 
-_DASH_PATH = os.path.join(os.path.dirname(__file__), "dashboard.html")
-
-
-def _load_dashboard() -> str:
+def _load_page(filename: str) -> str:
     try:
-        with open(_DASH_PATH, encoding="utf-8") as fh:
+        with open(os.path.join(os.path.dirname(__file__), filename), encoding="utf-8") as fh:
             return fh.read()
     except OSError:
-        return "<!doctype html><meta charset=utf-8><p>dashboard.html not found</p>"
+        return f"<!doctype html><meta charset=utf-8><p>{filename} not found</p>"
 
 
-DASHBOARD_HTML = _load_dashboard()
+DASHBOARD_HTML = _load_page("dashboard.html")
+ADMIN_HTML = _load_page("admin.html")
 
 
 def _security_settings() -> TransportSecuritySettings:

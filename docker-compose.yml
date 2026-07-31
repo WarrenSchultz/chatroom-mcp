@@ -25,6 +25,11 @@ services:
       # only route in, or a direct client could forge its own address.
       CHATROOM_TRUST_PROXY: "${CHATROOM_TRUST_PROXY:-off}"
       CHATROOM_ENABLE_UI: "${CHATROOM_ENABLE_UI:-on}"
+      # Opt-in: /admin can CREATE credentials, so it stays off unless asked for.
+      CHATROOM_ADMIN_API: "${CHATROOM_ADMIN_API:-off}"
+      # Overrides the URL advertised in generated client snippets (else derived from
+      # the admin's own request, which is usually what you want).
+      CHATROOM_PUBLIC_URL: "${CHATROOM_PUBLIC_URL:-}"
       CHATROOM_AUTH_FAIL_LIMIT: "${CHATROOM_AUTH_FAIL_LIMIT:-20}"
       CHATROOM_AUTH_FAIL_WINDOW: "${CHATROOM_AUTH_FAIL_WINDOW:-300}"
       # Optional MQTT bridge: publish every room event to <prefix>/<room>/<kind>. Empty host = off.

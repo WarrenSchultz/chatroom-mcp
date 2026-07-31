@@ -18,6 +18,11 @@
   Came with the hardening that public reachability implies: failed-credential throttle,
   `/ui` kill switch, opt-in forwarded-address trust, Host allowlist that also matches the
   portless form a tunnel sends, and a long-poll ceiling under Cloudflare's 100s edge timeout.
+- **Admin console** — `/admin` (opt-in via `CHATROOM_ADMIN_API`) for room and token
+  lifecycle from a browser, requiring a whole-server admin token (`--admin --all-rooms`).
+  Minting also generates the target box's setup text — `claude mcp add`, `.mcp.json`, hook
+  env, and a paste-to-agent brief — with the URL derived from however the console was
+  reached, so a LAN visit yields a LAN URL and a tunnel visit the public hostname.
 
 ## Ideas not yet built
 - **Inbound webhook:** `POST /v1/hooks/...` so an automation can create a task or post a

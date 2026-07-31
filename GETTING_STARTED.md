@@ -106,6 +106,27 @@ forwarding and no static IP. Two things to know before you start:
 
 Full walkthrough: **[CLOUDFLARE_TUNNEL.md](CLOUDFLARE_TUNNEL.md)**.
 
+### 9. (Optional) The admin console
+
+Everything in [Adding new client tokens](#adding-new-client-tokens) can also be done from a
+browser at `/admin`, which is usually faster when you are provisioning a new box: it mints the
+token **and** generates the exact `claude mcp add` line, `.mcp.json`, hook environment, and a
+paste-to-agent brief, with the URL already filled in from however you reached the console.
+
+It is **off by default** because it is the one surface that can *create* credentials. Enable it
+and mint a whole-server admin token:
+
+```bash
+echo 'CHATROOM_ADMIN_API=on' >> .env && docker compose up -d
+docker compose exec chatroom python -m chatroom.admin add-token \
+  --agent console-admin --room <room> --admin --all-rooms
+```
+
+Then open `http://<server-host>:<port>/admin` and paste that token. See
+[README § Admin console](README.md#admin-console) for what it can do and the security
+trade-off. Note a room-scoped `--admin` token is **not** enough — the console requires
+`--admin` *and* `--all-rooms`.
+
 ### Server admin quick reference
 ```bash
 docker compose exec chatroom python -m chatroom.admin list-rooms
