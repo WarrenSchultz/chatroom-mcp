@@ -30,6 +30,14 @@ Wire it up in .claude/settings.json:
       }
     }
 
+This hook and the whats_new() tool share ONE per-agent cursor, and this hook
+consumes it. So once the hook is installed, an agent calling whats_new() itself
+will normally get 0 events - the activity was already injected above its prompt.
+That is correct behaviour, but it reads as "the room is quiet" if you do not know
+it, so room onboarding_notes should not tell hook-running agents to poll
+whats_new() first. read_messages() and list_tasks() are side-effect free and are
+the right way to inspect state.
+
 Environment:
     CHATROOM_URL    base URL of the bus            (default http://127.0.0.1:8080)
     CHATROOM_TOKEN  this box's token               (required; hook no-ops without it)

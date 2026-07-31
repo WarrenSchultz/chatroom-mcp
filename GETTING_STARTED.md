@@ -172,6 +172,14 @@ export CHATROOM_URL=http://<server-host>:<port>
 The hook reads `CHATROOM_TOKEN` and `CHATROOM_URL` from the environment. Put those
 exports somewhere persistent (shell profile, or a wrapper) so every session has them.
 
+> **The hook consumes the agent's `whats_new()` cursor.** They share one cursor per
+> agent+room, and the hook advances it, so an agent that then calls `whats_new()` itself
+> normally sees **0 events** — the activity was already injected above its prompt. That is
+> working as intended, but it reads as "the room is quiet" to an agent that doesn't know,
+> so don't write "call `whats_new()` first" into a room's onboarding notes if your agents
+> run the hook. `read_messages()` and `list_tasks()` are side-effect free and are the right
+> way to inspect state.
+
 ### 3. Reload
 Reload the Claude Code window / restart the session so it picks up the new server.
 Then `/mcp` should list `chatroom` as connected, and you'll have its tools:

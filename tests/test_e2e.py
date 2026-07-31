@@ -434,6 +434,26 @@ def main() -> int:
         check("hook fails open when the bus is unreachable",
               dead.returncode == 0 and dead.stdout.strip() == "", dead.stdout[:200])
 
+        # The hook and the whats_new() tool share one cursor and the hook consumes it, so a
+        # hook-running agent's own whats_new() reports 0. Intended, but it reads as "the room
+        # is quiet", which misled a live agent — so pin the behaviour and keep the docs honest.
+        t_cursor = mint("cursorshare", "projA")
+        box1.call("post_message", {"body": "activity for the cursor-sharing check"})
+        injected = subprocess.run(
+            [sys.executable, str(ROOT / "hooks" / "chatroom_whats_new.py")],
+            capture_output=True, text=True,
+            env={**os.environ, "CHATROOM_URL": BASE, "CHATROOM_TOKEN": t_cursor})
+        check("hook delivers peer activity to a fresh agent",
+              "<chatroom_activity>" in injected.stdout, injected.stdout[:150])
+        after = Agent(t_cursor).call("whats_new")
+        check("hook consumed the cursor, so the agent's own whats_new() sees 0",
+              after.get("count") == 0, str(after)[:200])
+        check("...and nothing is left stranded behind that cursor",
+              after.get("remaining") == 0, str(after)[:200])
+        check("read_messages stays side-effect free and still shows the activity",
+              any("cursor-sharing check" in m["body"]
+                  for m in Agent(t_cursor).call("read_messages")["messages"]))
+
         print("\n--- revocation ---")
         subprocess.run([sys.executable, "-m", "chatroom.admin", "revoke", "--agent", "box2"],
                        cwd=ROOT, env=env, capture_output=True)
