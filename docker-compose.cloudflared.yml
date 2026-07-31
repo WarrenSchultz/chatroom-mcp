@@ -2,9 +2,11 @@
 #
 #   docker compose -f docker-compose.yml -f docker-compose.cloudflared.yml up -d
 #
-# See CLOUDFLARE_TUNNEL.md for the full walkthrough. In short: create a tunnel in the
-# Cloudflare Zero Trust dashboard, put its token in .env as CLOUDFLARE_TUNNEL_TOKEN,
-# and point the tunnel's public hostname at the origin http://chatroom:8080.
+# See CLOUDFLARE_TUNNEL.md for the full walkthrough. In short: create a tunnel under
+# Networking > Tunnels in the Cloudflare dashboard, take the token from the
+# "Install and run a connector" command shown there, put it in .env as
+# CLOUDFLARE_TUNNEL_TOKEN, and add a route (Published application) whose
+# Service URL is http://chatroom:8080.
 #
 # cloudflared shares this compose project's network, so it reaches the server as
 # `chatroom:8080` container-to-container. Nothing has to be published on the host for

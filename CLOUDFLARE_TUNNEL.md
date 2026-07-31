@@ -42,30 +42,30 @@ dies with the process, so they are not something to point real agents at.
 
 ## Set it up
 
-### 1. Create the tunnel in Cloudflare
+### 1. Create the tunnel and start the connector
 
-In the dashboard: **Zero Trust → Networks → Tunnels → Create a tunnel**, pick **Cloudflared**,
-name it (`chatroom`), and create. Cloudflare shows an install command containing a long
-token — you only need the token itself, not the command.
+In the Cloudflare dashboard: **Networking → Tunnels → Create a tunnel**. Name it
+(`chatroom`) and select **Create Tunnel**.
 
-Still in the tunnel's config, add a **Public hostname**:
+Cloudflare then shows **Install and run a connector** with **operating system** and
+**architecture** selectors, and generates install commands for whatever you pick — for
+Debian/Ubuntu, adding Cloudflare's package repo GPG key, the apt repo, the `cloudflared`
+package, and finally `cloudflared service install <TOKEN>`.
 
-| Field | Value |
-|---|---|
-| Subdomain | `chat` |
-| Domain | `example.com` |
-| Path | *(empty)* |
-| Type | `HTTP` |
-| URL | `chatroom:8080` |
+**Skip those commands.** They install `cloudflared` as a host service; the overlay in this
+repo runs it as a container instead. All you need from that screen is the **token** — the
+long `eyJ...` string at the end of the install command. Copy just that.
 
-`chatroom:8080` is the container name and in-container port. The overlay puts `cloudflared`
-on the same compose network, so it resolves that directly — nothing needs to be published on
-the host for the tunnel to work.
+> The dashboard offers two ways to run it: install as a system **service** (persistent) or
+> run it **manually** in a terminal for the session. The compose overlay is a third option
+> and equivalent to the service: `restart: unless-stopped` survives reboots, and the token
+> comes from `.env` rather than the command line.
 
-> Type is plain `HTTP`, not HTTPS. The hop from `cloudflared` to `chatroom` stays inside the
-> Docker network; the public leg is HTTPS either way, terminated by Cloudflare.
-
-Cloudflare creates the DNS record for `chat.example.com` for you.
+At the bottom of that screen is a **connector listing that updates live** while it waits for
+one to check in. Stay on this page: do steps 2 and 3 below now, watch the connector appear in
+that listing, and only then continue to the route step. You can click through to the route
+page first, but then you are configuring DNS without knowing whether the connector ever
+connected.
 
 #### Choosing the hostname
 
@@ -159,7 +159,58 @@ COMPOSE_FILE=docker-compose.yml:docker-compose.cloudflared.yml
 Then plain `docker compose up -d`, `logs`, and every `admin` command in
 [GETTING_STARTED.md](GETTING_STARTED.md) work unchanged, tunnel included.
 
-### 4. Confirm it end to end
+Watch the connector appear in the dashboard's live listing before you go on. Some QUIC
+handshake retries in the first few seconds are normal — `failed to accept QUIC stream:
+timeout` followed by a retry and then `Registered tunnel connection`. What matters is that it
+settles at four registrations and the container reports `healthy`:
+
+```bash
+docker inspect chatroom-cloudflared --format '{{.State.Health.Status}}'   # healthy
+docker logs chatroom-cloudflared 2>&1 | grep -c 'Registered tunnel connection'
+```
+
+### 4. Add the route in the dashboard
+
+With the connector connected, continue past the listing and add a route for the tunnel:
+**Published application** (older dashboards and some docs pages still call this a
+**public hostname** — same thing).
+
+| Field | Value |
+|---|---|
+| Hostname (subdomain + domain) | `chat` + `example.com` |
+| Path | *(empty)* |
+| Service URL | `http://chatroom:8080` |
+
+`chatroom:8080` is the container name and in-container port. The overlay puts `cloudflared` on
+the same compose network, so it resolves that directly — nothing needs to be published on the
+host for the tunnel to work. Verify from that network before you trust the route:
+
+```bash
+docker run --rm --network "$(docker inspect chatroom \
+  --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}')" \
+  curlimages/curl -s -o /dev/null -w '%{http_code}\n' http://chatroom:8080/healthz   # 200
+```
+
+> The service is plain `http://`, not HTTPS. The hop from `cloudflared` to `chatroom` stays
+> inside the Docker network; the public leg is HTTPS either way, terminated by Cloudflare.
+>
+> `cloudflared`'s image is distroless — there is no shell in it, so `docker exec … sh` fails
+> with `executable file not found`. Probe from a throwaway container as above instead.
+
+Cloudflare creates the DNS record for `chat.example.com` for you. Saving it pushes the new
+config to the connector, which logs it — the fastest way to confirm what the connector actually
+believes, rather than what you think you typed:
+
+```bash
+docker logs chatroom-cloudflared 2>&1 | grep 'Updated to new configuration' | tail -1
+# config="{\"ingress\":[{\"hostname\":\"chat.example.com\", \"service\":\"http://chatroom:8080\"}, …
+```
+
+That line is also how you recover the hostname later without going back to the dashboard.
+
+The tunnel shows **Healthy** on **Networking → Tunnels** once connected.
+
+### 5. Confirm it end to end
 
 ```bash
 curl -sf https://chat.example.com/healthz && echo OK
@@ -275,7 +326,9 @@ Worth doing whenever the tunnel is what makes this server reachable:
 | `403 Invalid Origin header` | A browser-based client sent an `Origin` the server wasn't told about. Any unlisted Origin is refused. | `CHATROOM_ALLOWED_ORIGINS=https://chat.example.com`. Claude Code and curl send no Origin and never hit this. |
 | Cloudflare **error 1033** or **530** | The edge has the DNS record but no tunnel is connected. | `docker logs chatroom-cloudflared`. Usually a bad/rotated `CLOUDFLARE_TUNNEL_TOKEN`. |
 | `no such service: cloudflared` | compose was invoked without the overlay file. | Pass both `-f` flags, or set `COMPOSE_FILE` in `.env` as shown in step 3. |
-| **502 Bad Gateway** through the tunnel, fine locally | `cloudflared` can't reach the origin. | The public hostname's URL must be `chatroom:8080` (container name, in-container port) — not `localhost:8090`, which inside the cloudflared container is itself. |
+| `docker exec chatroom-cloudflared sh` → `executable file not found` | The `cloudflared` image is distroless; it has no shell. | Not a fault. Use `docker logs`, and probe the origin from a throwaway container on the same network (step 4). |
+| QUIC `timeout: no recent network activity` at startup, then recovery | Normal handshake retries while the connector picks edge nodes. | Ignore if it settles at four `Registered tunnel connection` lines and health is `healthy`. If it churns continuously, force `TUNNEL_TRANSPORT_PROTOCOL=http2` on the cloudflared service — some networks mishandle UDP/QUIC. |
+| **502 Bad Gateway** through the tunnel, fine locally | `cloudflared` can't reach the origin. | The route's **Service URL** must be `http://chatroom:8080` (container name, in-container port) — not `localhost:8090`, which inside the cloudflared container is itself. Probe it from a throwaway container on the same network (step 4). |
 | **524 Timeout** on `wait_for_change` | Cloudflare gives up on an origin response at ~100s. | Already handled: the long poll is capped at 90s (`CHATROOM_MAX_WAIT_S`). If you raised it above ~95, lower it. |
 | `429` with `Retry-After` | The failed-auth budget for your address is spent. | Fix the token. A *valid* token still works during a throttle, so if a good token also 429s, something else is wrong. |
 | Dashboard loads but stays empty | The SSE stream needs a token, and `/ui` is a static page. | Paste an observer token. If you set `CHATROOM_ENABLE_UI=off`, `/ui` returns 404 by design. |
