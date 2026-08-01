@@ -31,6 +31,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -574,6 +575,21 @@ def main() -> int:
         finally:
             os.environ.pop("CHATROOM_PUBLIC_HOSTS", None)
         check("console_lan_only defaults on", security.console_lan_only())
+
+        # A page can only hide things if the hidden attribute actually hides them. The UA
+        # rule [hidden]{display:none} loses to any author `display:` on the same element,
+        # so `main{display:grid}` and `#veil{display:flex}` silently defeated it and the
+        # mint modal rendered over the console from page load, close button inert.
+        for page in ("admin.html", "dashboard.html"):
+            src = (ROOT / "chatroom" / page).read_text()
+            uses_hidden = bool(re.search(r"<[a-zA-Z][^>]*\shidden(\s|>)", src))
+            # Strip CSS/HTML comments first: prose *describing* the rule is not the rule,
+            # and matching it made an earlier version of this check pass with the fix removed.
+            code = re.sub(r"/\*.*?\*/|<!--.*?-->", "", src, flags=re.S)
+            guarded = bool(re.search(r"\[hidden\]\s*\{[^}]*display\s*:\s*none", code))
+            check(f"{page}: hidden attribute is CSS-guarded where it is used",
+                  guarded or not uses_hidden,
+                  f"uses hidden={uses_hidden} guard={guarded}")
         setup = provision.client_setup("https://bus.example.com", "box9", "cr_TESTTOKEN", "projA",
                                        extra_rooms=["projB"])
         check("generated CLI carries url, name and token",

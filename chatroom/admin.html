@@ -4,6 +4,11 @@
  :root{--bg:#11131a;--pan:#181b24;--ln:#262b38;--fg:#dfe3ec;--dim:#8b93a7;
        --ok:#4ec9a0;--warn:#e0af68;--bad:#f07178;--acc:#7aa2f7}
  *{box-sizing:border-box}
+ /* The hidden attribute only works through the UA rule [hidden]{display:none}, which any
+    author `display:` on the same element outranks — so `main{display:grid}` and
+    `#veil{display:flex}` below silently defeated it and the modal was visible from page
+    load, with its close button unable to do anything. Restate it as an author rule. */
+ [hidden]{display:none!important}
  body{margin:0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bg);color:var(--fg)}
  header{display:flex;gap:8px;align-items:center;padding:10px 14px;background:var(--pan);
         border-bottom:1px solid var(--ln);flex-wrap:wrap}
