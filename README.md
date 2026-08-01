@@ -81,8 +81,21 @@ server: create rooms, set retention and onboarding notes, mint tokens, revoke ag
 the instance's current posture. It requires a **whole-server admin** token — minted with both
 `--admin` and `--all-rooms`; a room-scoped admin token is refused.
 
-Its real value is that minting a token also emits the setup text for the target box, with the
-URL already correct for however you reached the console (LAN address vs tunnel hostname):
+**The consoles are LAN-only.** `/ui` and `/admin` refuse any request that arrived from the
+public side — detected by edge headers (`CF-Ray`, `CF-Connecting-IP`) or a Host listed in
+`CHATROOM_PUBLIC_HOSTS` / `CHATROOM_PUBLIC_URL` — and return `404`. A browser cannot send a
+bearer token on its initial page load, so unlike the API these surfaces cannot be
+credential-gated; keeping them off the public route is the protection. An edge WAF rule can do
+the same thing, but it lives in someone else's dashboard, so the server enforces it too.
+
+Because of that, minting emits setup text for **both routes**, and you pick per machine:
+
+- **LAN** (preferred, shown first) — shorter path, no tunnel bandwidth, no dependency on an
+  external service staying up
+- **Remote** — only for machines that cannot reach the LAN address, from `CHATROOM_PUBLIC_URL`
+
+The public URL is *configured*, never inferred: the admin is by definition on the LAN, so
+their request can never reveal the tunnel hostname. Each route gets:
 
 - the `claude mcp add …` line, and the equivalent `.mcp.json`
 - the hook's `CHATROOM_URL` / `CHATROOM_TOKEN` / `CHATROOM_ROOM` exports, plus install steps
@@ -155,7 +168,10 @@ extra rooms. Tokens are shown once and stored only as SHA-256. See
 | `CHATROOM_TRUST_PROXY` | `off` | believe `CF-Connecting-IP`/`X-Forwarded-For`. Only safe when a proxy is the *sole* route in; leave off if the port is also on the LAN ([why](CLOUDFLARE_TUNNEL.md#lan-and-tunnel-together)) |
 | `CHATROOM_ENABLE_UI` | `on` | `off` removes the `/ui` dashboard (for internet-exposed hosts) |
 | `CHATROOM_ADMIN_API` | `off` | `on` serves the `/admin` console + `/v1/admin/*` (can mint credentials) |
-| `CHATROOM_PUBLIC_URL` | unset | pins the URL in admin-generated client snippets |
+| `CHATROOM_CONSOLE_LAN_ONLY` | `on` | `/ui` and `/admin` refuse public-side requests (edge headers or a public Host) |
+| `CHATROOM_PUBLIC_URL` | unset | external URL — generates remote setup commands, and marks that host public-side |
+| `CHATROOM_PUBLIC_HOSTS` | unset | extra hostnames treated as public-side |
+| `CHATROOM_LAN_URL` | from request | override the LAN URL in generated snippets |
 | `CHATROOM_AUTH_FAIL_LIMIT` / `_WINDOW` | `20` / `300` | failed-credential budget per address, then `429`; `0` disables |
 | `CHATROOM_MAX_WAIT_S` | `90` | `wait_for_change` ceiling; under Cloudflare's 100s edge timeout |
 | `CHATROOM_HOOK_DEBUG` | unset | *(hook-side)* `1` explains each hook outcome on stderr instead of failing open silently |
@@ -170,7 +186,7 @@ extra rooms. Tokens are shown once and stored only as SHA-256. See
 docker compose run --rm chatroom python tests/test_e2e.py
 ```
 
-Spins up a live server and exercises 138 assertions over the same JSON-RPC path Claude Code
+Spins up a live server and exercises 153 assertions over the same JSON-RPC path Claude Code
 uses: token→identity, room isolation, concurrent claim contention, version conflicts, cursor
 advance, read-only enforcement, chat post/read/threading/isolation, REST + SSE surfaces, hook
 behaviour (including fail-open plus its debug diagnostics), revocation, the admin console's

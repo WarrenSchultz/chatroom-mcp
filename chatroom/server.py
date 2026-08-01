@@ -1015,8 +1015,26 @@ async def rest_set_room_info(request: Request) -> JSONResponse:
 # why creating credentials remotely is opt-in.
 
 
+def _console_blocked(request: Request) -> JSONResponse | None:
+    """Refuse a browser-console surface that arrived from the public side.
+
+    Enforced here as well as at any edge rule, because a credential-minting console
+    should not be private only by virtue of configuration in someone else's dashboard.
+    404 rather than 403: there is nothing to be gained by confirming it exists.
+    """
+    if security.console_lan_only() and security.arrived_from_public(request.headers):
+        print(f"[chatroom] refused console request from the public side: "
+              f"{request.url.path} host={request.headers.get('host')!r} "
+              f"addr={security.client_addr()}", flush=True)
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return None
+
+
 def _server_admin(request: Request) -> tuple[sqlite3.Connection, db.Identity] | JSONResponse:
     """Authenticate a whole-server admin, or return the response to send back."""
+    blocked = _console_blocked(request)
+    if blocked is not None:
+        return blocked
     if not security.admin_api_enabled():
         return JSONResponse(
             {"error": "admin API is disabled; set CHATROOM_ADMIN_API=on to enable it"},
@@ -1082,7 +1100,8 @@ async def admin_state(request: Request) -> JSONResponse:
             "you_are": ident.agent,
             "rooms": db.list_rooms_full(conn),
             "tokens": tokens,
-            "suggested_base_url": provision.base_url(request.headers, request.url.scheme),
+            "lan_url": provision.lan_url(request.headers, request.url.scheme),
+            "public_url": provision.public_url(),
             "server": {
                 "trust_proxy": security.trust_proxy(),
                 "ui_enabled": security.ui_enabled(),
@@ -1164,10 +1183,13 @@ async def admin_mint_token(request: Request) -> JSONResponse:
                f"agent={agent} room={room} extra={extra} readonly={readonly} "
                f"admin={admin} all_rooms={all_rooms}"
                + ("  <-- NEW WHOLE-SERVER ADMIN" if (admin and all_rooms) else ""))
-        url = str(body.get("base_url") or "").strip() or provision.base_url(
+        # Both routes, always: the console is LAN-only so the admin is on the LAN, but
+        # the machine being provisioned may be anywhere. See provision.both_setups.
+        lan = str(body.get("lan_url") or "").strip() or provision.lan_url(
             request.headers, request.url.scheme)
-        setup = provision.client_setup(
-            url.rstrip("/"), agent, token, room, readonly=readonly, admin=admin,
+        pub = str(body.get("public_url") or "").strip() or provision.public_url()
+        setups = provision.both_setups(
+            lan.rstrip("/"), pub, agent, token, room, readonly=readonly, admin=admin,
             all_rooms=all_rooms, extra_rooms=extra)
         return JSONResponse({
             "ok": True,
@@ -1177,7 +1199,7 @@ async def admin_mint_token(request: Request) -> JSONResponse:
             "room": room,
             "extra_rooms": sorted(set(extra)),
             "flags": {"readonly": readonly, "admin": admin, "all_rooms": all_rooms},
-            "setup": setup,
+            "setup": setups,
         })
     finally:
         conn.close()
@@ -1211,7 +1233,9 @@ async def admin_revoke_token(request: Request) -> JSONResponse:
 
 
 @mcp.custom_route("/admin", methods=["GET"])
-async def admin_console(_request: Request) -> HTMLResponse:
+async def admin_console(request: Request) -> HTMLResponse:
+    if security.console_lan_only() and security.arrived_from_public(request.headers):
+        return HTMLResponse("not found\n", status_code=404)
     if not security.admin_api_enabled():
         return HTMLResponse(
             "admin console disabled (set CHATROOM_ADMIN_API=on)\n", status_code=404)
@@ -1303,10 +1327,12 @@ async def rest_stream(request: Request):
 
 
 @mcp.custom_route("/ui", methods=["GET"])
-async def ui(_request: Request) -> HTMLResponse:
-    # The page itself carries no data — an observer token typed into it is what
-    # fetches anything. Still, an internet-exposed instance has no reason to
-    # advertise a console, so CHATROOM_ENABLE_UI=off removes the route's content.
+async def ui(request: Request) -> HTMLResponse:
+    # Browser consoles are LAN-only by default: a browser cannot send a bearer token
+    # on the initial page load, so this surface can never be credential-gated the way
+    # the API is. Keeping it off the public side is the only real protection it has.
+    if security.console_lan_only() and security.arrived_from_public(request.headers):
+        return HTMLResponse("not found\n", status_code=404)
     if not security.ui_enabled():
         return HTMLResponse("dashboard disabled (CHATROOM_ENABLE_UI=off)\n", status_code=404)
     return HTMLResponse(DASHBOARD_HTML)

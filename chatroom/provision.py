@@ -30,26 +30,29 @@ import json
 import os
 import shlex
 from collections.abc import Mapping
+from typing import Any
 
-#: Env override for the URL advertised in generated snippets. Set this when the
-#: URL clients should use is not the one the admin happens to be browsing.
+#: The externally reachable base URL (tunnel/reverse proxy). Must be configured — it
+#: cannot be inferred from a LAN-only admin console's own request.
 PUBLIC_URL_ENV = "CHATROOM_PUBLIC_URL"
 
+#: Override for the LAN base URL, when the name the admin browses is not the one other
+#: machines on the network should use.
+LAN_URL_ENV = "CHATROOM_LAN_URL"
 
-def base_url(headers: Mapping[str, str], fallback_scheme: str = "http") -> str:
-    """Best guess at the URL a client should use, from the admin's own request.
 
-    An admin on the LAN sees a LAN URL; the same page reached through the tunnel
-    yields the public hostname. That is deliberate: the snippet should match the
-    route the admin is provisioning for.
+def lan_url(headers: Mapping[str, str], fallback_scheme: str = "http") -> str:
+    """The LAN URL, taken from the admin's own request.
 
-    `X-Forwarded-Proto` is honoured because Cloudflare sets it and the origin hop
-    is plain HTTP. It is spoofable by a direct client, but this only affects the
-    text of a generated snippet an operator is about to read — never an access
-    decision — so believing it costs nothing. CHATROOM_PUBLIC_URL overrides
-    everything when the guess is wrong.
+    The console is LAN-only, so the admin is by definition reaching it over the LAN
+    and their Host header *is* the address other machines on that network should use.
+    That makes request-derivation exactly right for this half — and useless for the
+    other half, which is why the public URL is configured rather than inferred.
+
+    CHATROOM_LAN_URL overrides, for the case where the admin browses via a name that
+    other hosts cannot resolve.
     """
-    override = os.environ.get(PUBLIC_URL_ENV, "").strip()
+    override = os.environ.get(LAN_URL_ENV, "").strip()
     if override:
         return override.rstrip("/")
     lower = {k.lower(): v for k, v in headers.items()}
@@ -58,6 +61,17 @@ def base_url(headers: Mapping[str, str], fallback_scheme: str = "http") -> str:
     if not host:
         return f"{proto}://127.0.0.1:8080"
     return f"{proto}://{host}".rstrip("/")
+
+
+def public_url() -> str | None:
+    """The externally reachable URL, or None if this instance has no public route.
+
+    Configuration, never inference. An admin sitting on the LAN cannot have their
+    request tell us the tunnel hostname, and guessing it would put a wrong URL into
+    a remote machine's config — the exact failure this whole module exists to avoid.
+    """
+    url = os.environ.get(PUBLIC_URL_ENV, "").strip()
+    return url.rstrip("/") or None
 
 
 def server_name(room: str) -> str:
@@ -155,6 +169,40 @@ def client_setup(
         "agent_brief": agent_brief,
         "admin_cli_equivalent": _admin_cli(agent, room, readonly, admin, all_rooms, extra_rooms),
     }
+
+
+def both_setups(
+    lan: str,
+    public: str | None,
+    agent: str,
+    token: str,
+    room: str,
+    **flags,
+) -> dict[str, Any]:
+    """Setup text for *both* routes, because the admin cannot know which the box needs.
+
+    The console is LAN-only, so whoever mints a token is on the LAN while the machine
+    being provisioned may be anywhere. Emitting only the route the admin happens to be
+    using would be right half the time and silently wrong the other half — a remote box
+    handed a `10.x` URL fails with a connection timeout that looks nothing like a
+    misconfiguration.
+
+    LAN is listed first deliberately: it is a shorter path, keeps traffic off the tunnel,
+    and does not depend on an external service staying up.
+    """
+    out: dict[str, Any] = {
+        "lan": client_setup(lan, agent, token, room, **flags),
+        "public": client_setup(public, agent, token, room, **flags) if public else None,
+        "prefer": "lan",
+    }
+    if not public:
+        out["public_hint"] = (
+            "No external URL is configured, so only LAN setup is shown. If this instance "
+            "is published through a tunnel or reverse proxy, set CHATROOM_PUBLIC_URL so "
+            "remote machines get a working command — it cannot be inferred from here, "
+            "because this console is only reachable over the LAN."
+        )
+    return out
 
 
 def _admin_cli(agent, room, readonly, admin, all_rooms, extra_rooms) -> str:

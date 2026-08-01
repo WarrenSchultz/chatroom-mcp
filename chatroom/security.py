@@ -245,6 +245,57 @@ def ui_enabled() -> bool:
     return _flag("CHATROOM_ENABLE_UI", "on")
 
 
+#: Headers Cloudflare adds at its edge. A client cannot strip these on the way in — the
+#: edge sets them after the request is already past it — so their presence is a reliable
+#: "this arrived from outside" signal. A LAN client could *forge* them, but that only ever
+#: makes a request look more external, i.e. more restricted, so the failure mode is safe.
+_EDGE_HEADERS = ("cf-ray", "cf-connecting-ip", "cf-ipcountry", "x-forwarded-for")
+
+
+def public_hostnames() -> list[str]:
+    """Hostnames that mean "this request came from the public side".
+
+    From CHATROOM_PUBLIC_HOSTS, plus the host of CHATROOM_PUBLIC_URL if set, so a
+    single-hostname deployment only has to configure one variable.
+    """
+    hosts = [h.strip().lower() for h in
+             os.environ.get("CHATROOM_PUBLIC_HOSTS", "").split(",") if h.strip()]
+    pub = os.environ.get("CHATROOM_PUBLIC_URL", "").strip()
+    if pub:
+        from urllib.parse import urlparse
+        h = (urlparse(pub).hostname or "").lower()
+        if h and h not in hosts:
+            hosts.append(h)
+    return hosts
+
+
+def arrived_from_public(headers: Mapping[str, str] | None) -> bool:
+    """Whether this request reached us from outside rather than the local network.
+
+    Two independent signals, either sufficient: an edge-injected header, or a Host
+    matching a configured public hostname. Deliberately *not* the peer IP — a tunnel
+    connector usually runs on this same host, so its TCP address is a private one and
+    tells you nothing.
+    """
+    if not headers:
+        return False
+    lower = {k.lower(): v for k, v in headers.items()}
+    if any(lower.get(h) for h in _EDGE_HEADERS):
+        return True
+    host = (lower.get("host") or "").split(":")[0].strip().lower()
+    return bool(host) and host in public_hostnames()
+
+
+def console_lan_only() -> bool:
+    """Whether the browser consoles (/ui, /admin) refuse public-side requests.
+
+    On by default. An edge WAF rule can already keep them off a public hostname, but
+    that lives in someone else's dashboard and can be edited, disabled, or forgotten —
+    the server should not depend on it to keep a credential-minting console private.
+    """
+    return _flag("CHATROOM_CONSOLE_LAN_ONLY", "on")
+
+
 def admin_api_enabled() -> bool:
     """Whether the /admin console and its API are served. **Off by default.**
 

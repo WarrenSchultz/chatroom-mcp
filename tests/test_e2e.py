@@ -119,6 +119,14 @@ def main() -> int:
     for suffix in ("", "-wal", "-shm"):
         Path(DB + suffix).unlink(missing_ok=True)
 
+    # The suite calls provision/security helpers in-process, and those read os.environ.
+    # Clear the deployment's own values so the assertions do not depend on how this
+    # particular box is configured (same lesson as the pinned subprocess env below).
+    for k in ("CHATROOM_PUBLIC_URL", "CHATROOM_PUBLIC_HOSTS", "CHATROOM_LAN_URL",
+              "CHATROOM_ADMIN_API", "CHATROOM_CONSOLE_LAN_ONLY", "CHATROOM_ROOM",
+              "CHATROOM_TOKEN", "CHATROOM_URL"):
+        os.environ.pop(k, None)
+
     # Pin every setting the assertions depend on. The suite runs inside the same image
     # as the server, so without this it inherits the deployment's own configuration and
     # asserts against whatever the operator happens to have enabled — which is how the
@@ -525,17 +533,47 @@ def main() -> int:
 
         # --- admin console API -------------------------------------------------
         print("\n--- admin console (/admin + /v1/admin/*) ---")
-        from chatroom import provision
+        from chatroom import provision, security
 
         # Pure-function checks first: URL derivation and snippet shape are where the
         # awkwardness lives, and they need no server.
-        check("base_url honours X-Forwarded-Proto (tunnel terminates TLS upstream)",
-              provision.base_url({"host": "bus.example.com", "x-forwarded-proto": "https"})
-              == "https://bus.example.com")
-        check("base_url falls back to the request scheme on a LAN hit",
-              provision.base_url({"host": "10.0.0.5:8090"}) == "http://10.0.0.5:8090")
+        check("lan_url comes from the admin's own (LAN) request",
+              provision.lan_url({"host": "10.0.0.5:8090"}) == "http://10.0.0.5:8090")
+        check("public_url is configuration, never inferred from a request",
+              provision.public_url() is None)
+        os.environ["CHATROOM_PUBLIC_URL"] = "https://bus.example.com/"
+        try:
+            check("public_url reads CHATROOM_PUBLIC_URL and strips the trailing slash",
+                  provision.public_url() == "https://bus.example.com")
+            both = provision.both_setups("http://10.0.0.5:8090", provision.public_url(),
+                                         "box9", "cr_TESTTOKEN", "projA")
+            check("both_setups emits a LAN and a public variant",
+                  both["lan"]["url"] == "http://10.0.0.5:8090"
+                  and both["public"]["url"] == "https://bus.example.com", str(both)[:120])
+            check("LAN is the recommended route", both["prefer"] == "lan")
+            check("the two variants differ only in URL",
+                  both["lan"]["claude_cli"].replace("http://10.0.0.5:8090", "X")
+                  == both["public"]["claude_cli"].replace("https://bus.example.com", "X"))
+        finally:
+            os.environ.pop("CHATROOM_PUBLIC_URL", None)
+        nopub = provision.both_setups("http://10.0.0.5:8090", None, "box9", "cr_T", "projA")
+        check("with no public URL configured, the public variant is absent and explained",
+              nopub["public"] is None and "CHATROOM_PUBLIC_URL" in nopub["public_hint"])
         check("server_name is per-room so cross-posting stays impossible",
               provision.server_name("proj-a") == "chatroom-proj-a")
+
+        # Consoles must refuse public-side requests on their own, not only via an edge rule.
+        check("an edge header marks a request as public-side",
+              security.arrived_from_public({"CF-Ray": "abc123"}))
+        check("a plain LAN request is not public-side",
+              not security.arrived_from_public({"Host": "10.0.0.5:8090"}))
+        os.environ["CHATROOM_PUBLIC_HOSTS"] = "bus.example.com"
+        try:
+            check("a Host matching a configured public hostname is public-side",
+                  security.arrived_from_public({"Host": "bus.example.com"}))
+        finally:
+            os.environ.pop("CHATROOM_PUBLIC_HOSTS", None)
+        check("console_lan_only defaults on", security.console_lan_only())
         setup = provision.client_setup("https://bus.example.com", "box9", "cr_TESTTOKEN", "projA",
                                        extra_rooms=["projB"])
         check("generated CLI carries url, name and token",
@@ -592,8 +630,8 @@ def main() -> int:
 
             sah = {"Authorization": f"Bearer {t_alladmin}"}
             st = rc.get(f"{abase}/v1/admin/state", headers=sah).json()
-            check("state lists rooms, token metadata and server posture",
-                  {"rooms", "tokens", "server", "suggested_base_url"} <= set(st))
+            check("state lists rooms, token metadata, posture and both client URLs",
+                  {"rooms", "tokens", "server", "lan_url", "public_url"} <= set(st), str(sorted(st)))
             check("state never leaks token values, only metadata",
                   not any("cr_" in json.dumps(t) for t in st["tokens"]), str(st["tokens"])[:150])
 
@@ -609,12 +647,13 @@ def main() -> int:
 
             got_tok = rc.post(f"{abase}/v1/admin/tokens", headers=sah,
                               json={"agent": "mintedbox", "room": "adminmade",
-                                    "base_url": "https://bus.example.com"}).json()
+                                    "lan_url": "https://bus.example.com"}).json()
             check("mint returns a usable token plus setup snippets",
-                  got_tok["token"].startswith("cr_") and "claude_cli" in got_tok["setup"],
-                  str(got_tok)[:150])
-            check("mint honours an explicit base_url",
-                  "https://bus.example.com/mcp" in got_tok["setup"]["claude_cli"])
+                  got_tok["token"].startswith("cr_")
+                  and "claude_cli" in got_tok["setup"]["lan"], str(got_tok)[:150])
+            check("mint honours an explicit lan_url",
+                  "https://bus.example.com/mcp" in got_tok["setup"]["lan"]["claude_cli"],
+                  got_tok["setup"]["lan"]["claude_cli"])
             minted = Agent(got_tok["token"])
             who = minted.call("list_tasks")
             check("a token minted over HTTP actually authenticates",
@@ -635,6 +674,34 @@ def main() -> int:
                   "_tool_error" in Agent(got_tok["token"]).call("list_tasks"))
             check("admin can delete a room it created",
                   rc.delete(f"{abase}/v1/rooms/adminmade", headers=sah).json()["ok"])
+
+            # Same credential, same endpoint, but presented as if it arrived from the
+            # public side: the console surfaces must vanish rather than authenticate.
+            pub_hdr = {**sah, "CF-Ray": "0000000000000000-TEST"}
+            for path in ("/v1/admin/state", "/admin", "/ui"):
+                r = rc.get(f"{abase}{path}", headers=pub_hdr)
+                check(f"{path} is 404 when the request looks public-side",
+                      r.status_code == 404, f"{path} -> {r.status_code}")
+            check("but the MCP endpoint still serves public-side traffic",
+                  rc.post(f"{abase}/mcp",
+                          json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                          headers={"Authorization": f"Bearer {t_box1}",
+                                   "Content-Type": "application/json",
+                                   "Accept": "application/json, text/event-stream",
+                                   "CF-Ray": "0000000000000000-TEST"}).status_code == 200)
+            check("and so does the REST surface agents and hooks use",
+                  rc.get(f"{abase}/v1/tasks",
+                         headers={"Authorization": f"Bearer {t_box1}",
+                                  "CF-Ray": "0000000000000000-TEST"}).status_code == 200)
+            mint_pub = rc.post(f"{abase}/v1/admin/tokens", headers=sah,
+                               json={"agent": "dualbox", "room": "projA",
+                                     "lan_url": "http://10.0.0.5:8090",
+                                     "public_url": "https://bus.example.com"}).json()
+            check("mint returns setup for both routes",
+                  mint_pub["setup"]["lan"]["url"] == "http://10.0.0.5:8090"
+                  and mint_pub["setup"]["public"]["url"] == "https://bus.example.com",
+                  str(mint_pub.get("setup"))[:140])
+            rc.post(f"{abase}/v1/admin/tokens/revoke", headers=sah, json={"agent": "dualbox"})
         finally:
             asrv.terminate()
             try:

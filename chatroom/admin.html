@@ -47,6 +47,17 @@
  .muted{color:var(--dim)}
  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px}
  details{margin-top:8px} summary{cursor:pointer;color:var(--dim);font-size:11px}
+ #veil{position:fixed;inset:0;background:#000a;display:flex;align-items:flex-start;
+       justify-content:center;padding:24px;overflow:auto;z-index:9}
+ #modal{background:var(--pan);border:1px solid var(--ln);border-radius:8px;max-width:900px;
+        width:100%;padding:16px}
+ #modal h2{font-size:13px;text-transform:none;letter-spacing:0;color:var(--fg)}
+ .tabs{display:flex;gap:6px;margin:10px 0 4px;border-bottom:1px solid var(--ln)}
+ .tabs button{background:transparent;color:var(--dim);border:0;border-bottom:2px solid transparent;
+              border-radius:0;padding:6px 12px}
+ .tabs button.on{color:var(--acc);border-bottom-color:var(--acc)}
+ .pane{display:none} .pane.on{display:block}
+ .pref{font-size:11px;color:var(--ok);margin-left:6px}
 </style>
 
 <header>
@@ -79,7 +90,8 @@
       <label>agent name</label><input id="mtAgent" placeholder="box-hostname">
       <label>room</label><select id="mtRoom"></select>
       <label>also rooms</label><input id="mtExtra" placeholder="comma-separated (optional)">
-      <label>client url</label><input id="mtUrl" placeholder="auto">
+      <label>LAN url</label><input id="mtLan" placeholder="auto (from this page)">
+      <label>public url</label><input id="mtPub" placeholder="from CHATROOM_PUBLIC_URL">
     </div>
     <div class="chk" style="margin-top:8px">
       <label><input type="checkbox" id="mtRo"> read-only observer</label>
@@ -88,7 +100,6 @@
     </div>
     <div class="row"><button id="mtGo">mint token</button>
       <span class="muted">shown once — nothing stores the raw value</span></div>
-    <div id="mtOut"></div>
   </section>
 
   <section class="wide">
@@ -102,6 +113,18 @@
     <table><tbody id="srv"></tbody></table>
   </section>
 </main>
+
+<div id="veil" hidden><div id="modal">
+  <div style="display:flex;align-items:center;gap:10px">
+    <h2 id="mTitle" style="margin:0">Token minted</h2>
+    <button class="ghost" style="margin-left:auto" id="mClose">close</button>
+  </div>
+  <div class="warn" style="margin-top:10px">Shown once. Only a SHA-256 is stored — if you lose
+    this, revoke the agent and mint again.</div>
+  <div id="mTok"></div>
+  <div class="tabs" id="mTabs"></div>
+  <div id="mPanes"></div>
+</div></div>
 
 <script>
 const $=s=>document.querySelector(s), esc=s=>String(s??"").replace(/[<>&"]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]));
@@ -163,7 +186,9 @@ function drawServer(){
     ["failed-auth limit",s.auth_fail_limit?s.auth_fail_limit+" per window":"disabled"],
     ["put_file cap",s.max_file_bytes+" bytes"],
     ["wait_for_change cap",s.max_wait_s+"s"],
-    ["url for new clients",state.suggested_base_url],
+    ["LAN url for new clients",state.lan_url],
+    ["public url for new clients",state.public_url||"(unset — remote setup cannot be generated)"],
+    ["consoles","LAN only" ],
   ];
   $("#srv").innerHTML=rows.map(([k,v])=>`<tr><td class="muted" style="width:180px">${esc(k)}</td><td>${esc(v)}</td></tr>`).join("");
 }
@@ -174,29 +199,60 @@ function snip(title,body,cls){
           <button class="ghost" data-copy="${id}">copy</button></div>`;
 }
 
+function wireCopy(root){
+  root.querySelectorAll("[data-copy]").forEach(b=>b.onclick=()=>{
+    navigator.clipboard.writeText($("#"+b.dataset.copy).textContent);
+    b.textContent="copied"; setTimeout(()=>b.textContent="copy",1200);
+  });
+}
+
+function paneFor(s,agent){
+  return snip("register with Claude Code (run on "+agent+")",s.claude_cli)
+       + snip("or .mcp.json",s.mcp_json)
+       + snip("hook environment",s.hook_env)
+       + snip("hook install",s.hook_install)
+       + snip("paste this to the agent",s.agent_brief);
+}
+
+function showMint(d){
+  const sets=d.setup;
+  $("#mTitle").textContent=`Token minted — ${d.agent} → ${d.room}`;
+  $("#mTok").innerHTML=snip("token",d.token,"tok");
+  // LAN first: shorter path, no tunnel bandwidth, no dependency on an external service.
+  const tabs=[["lan","LAN"]];
+  if(sets.public) tabs.push(["public","Remote / public"]);
+  $("#mTabs").innerHTML=tabs.map(([k,l],i)=>
+    `<button data-tab="${k}" class="${i===0?"on":""}">${l}${k==="lan"?'<span class="pref">prefer</span>':""}</button>`).join("");
+  $("#mPanes").innerHTML=tabs.map(([k],i)=>
+    `<div class="pane ${i===0?"on":""}" data-pane="${k}">
+       <div class="muted" style="margin:6px 0">${k==="lan"
+         ? "Use this for any machine on the same network as the server — shorter path, no tunnel in the way."
+         : "Use this only for machines that cannot reach the LAN address."}
+         Base URL: <b>${esc(sets[k].url)}</b></div>
+       ${paneFor(sets[k],d.agent)}</div>`).join("")
+    + (sets.public?"":`<div class="warn" style="margin-top:10px">${esc(sets.public_hint||"")}</div>`)
+    + snip("equivalent host command (for your records)",sets.lan.admin_cli_equivalent);
+  $("#mTabs").querySelectorAll("[data-tab]").forEach(b=>b.onclick=()=>{
+    $("#mTabs").querySelectorAll("button").forEach(x=>x.classList.remove("on"));
+    b.classList.add("on");
+    $("#mPanes").querySelectorAll(".pane").forEach(p=>
+      p.classList.toggle("on",p.dataset.pane===b.dataset.tab));
+  });
+  wireCopy($("#modal"));
+  $("#veil").hidden=false;
+}
+
 async function mint(){
   const extra=$("#mtExtra").value.split(",").map(s=>s.trim()).filter(Boolean);
   const body={agent:$("#mtAgent").value.trim(),room:$("#mtRoom").value,also_rooms:extra,
     readonly:$("#mtRo").checked,admin:$("#mtAdmin").checked,all_rooms:$("#mtAll").checked};
-  if($("#mtUrl").value.trim()) body.base_url=$("#mtUrl").value.trim();
+  if($("#mtLan").value.trim()) body.lan_url=$("#mtLan").value.trim();
+  if($("#mtPub").value.trim()) body.public_url=$("#mtPub").value.trim();
   if(!body.agent){ note("agent name required","err"); return; }
   if(body.admin&&body.all_rooms&&!confirm("This mints a WHOLE-SERVER ADMIN token: it can create and revoke credentials for every room. Continue?")) return;
   try{
     const d=await api("/v1/admin/tokens",{method:"POST",body:JSON.stringify(body)});
-    const s=d.setup;
-    $("#mtOut").innerHTML=
-      `<div class="warn">Shown once. Only a SHA-256 is stored — if you lose this, revoke and mint again.</div>`
-      + snip("token",d.token,"tok")
-      + snip("register with Claude Code (run on "+d.agent+")",s.claude_cli)
-      + snip("or .mcp.json",s.mcp_json)
-      + snip("hook environment",s.hook_env)
-      + snip("hook install",s.hook_install)
-      + snip("paste this to the agent",s.agent_brief)
-      + snip("equivalent host command (for your records)",s.admin_cli_equivalent);
-    $("#mtOut").querySelectorAll("[data-copy]").forEach(b=>b.onclick=()=>{
-      navigator.clipboard.writeText($("#"+b.dataset.copy).textContent);
-      b.textContent="copied"; setTimeout(()=>b.textContent="copy",1200);
-    });
+    showMint(d);
     note("minted "+d.agent+" for "+d.room,"ok");
     await load();
   }catch(e){ note(e.message,"err"); }
@@ -250,4 +306,7 @@ $("#go").onclick=async()=>{ tok=$("#tok").value.trim();
 $("#tok").addEventListener("keydown",e=>{ if(e.key==="Enter") $("#go").click(); });
 $("#mtGo").onclick=mint;
 $("#nrAdd").onclick=addRoom;
+$("#mClose").onclick=()=>{$("#veil").hidden=true;};
+$("#veil").onclick=e=>{ if(e.target.id==="veil") $("#veil").hidden=true; };
+document.addEventListener("keydown",e=>{ if(e.key==="Escape") $("#veil").hidden=true; });
 </script>
