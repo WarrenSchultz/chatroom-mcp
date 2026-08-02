@@ -27,6 +27,11 @@ services:
       TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN in .env (see CLOUDFLARE_TUNNEL.md)}"
       # Metrics/readiness on localhost inside the container, for the healthcheck below.
       TUNNEL_METRICS: "127.0.0.1:2000"
+      # quic (cloudflared's default) rides UDP, and some paths drop long-lived UDP flows —
+      # the connector then logs "no recent network activity", drops its connections, and
+      # every request in that window becomes a 502 at the edge even though the origin is
+      # perfectly healthy. Set CLOUDFLARE_TUNNEL_PROTOCOL=http2 to run over TCP instead.
+      TUNNEL_TRANSPORT_PROTOCOL: "${CLOUDFLARE_TUNNEL_PROTOCOL:-auto}"
     depends_on:
       - chatroom
     healthcheck:
