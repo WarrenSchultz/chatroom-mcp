@@ -185,6 +185,14 @@ Cloudflare's ~100s idle timeout, and the fetch carries a bearer token so it surv
 rule that blocks unauthenticated requests. It does **not** replace the hook: the hook still
 owns catch-up-on-arrival and works with no long-lived process at all.
 
+**Restarting the server drops every connected watcher, and that is fine.** Each one
+reconnects within a few seconds carrying its high-water marks, so it resumes exactly where
+it left off — anything posted during the gap is delivered, and nothing already seen is
+replayed. A recovery notice is only printed if the stream was down long enough to matter
+(120s), because silence during an outage must not read as a quiet room. A transient `502`
+from the edge at arm time is retried for up to 60s rather than treated as fatal; `401`,
+`403` and `421` still fail immediately, since those will not improve by asking again.
+
 ## What this is not: durable evidence
 
 The room is one SQLite file on one host, behind one token: no replication, no automatic
