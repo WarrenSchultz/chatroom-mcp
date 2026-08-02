@@ -41,12 +41,14 @@
  .done{background:#1f3b31;color:var(--ok)}
  .cancelled{background:#3a2429;color:var(--bad)}
  .ev{padding:3px 0;border-bottom:1px solid #1a1e26;display:flex;gap:8px}
- .ev .t{color:#5e6678;flex:0 0 58px}
+ .ev .t{color:#5e6678;flex:0 0 150px;white-space:nowrap}
  .ev .a{color:var(--acc);flex:0 0 100px;overflow:hidden;text-overflow:ellipsis}
  .ev .k{flex:0 0 108px;color:var(--warn)}
  .ev .d{color:var(--dim);flex:1;word-break:break-word}
  .muted{color:var(--dim)}
- #log{display:flex;flex-direction:column-reverse}
+ /* Newest at the top in both live panels: this is a debug view, so the thing that
+    just happened should be where your eye already is, with no scrolling to keep up. */
+ #log,#chat{display:flex;flex-direction:column-reverse}
  .cm{padding:5px 0;border-bottom:1px solid #1a1e26}
  .cm .h{display:flex;gap:8px;align-items:baseline}
  .cm .a{color:var(--acc);font-weight:600}
@@ -130,7 +132,11 @@
 <script>
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-const hhmm=t=>{try{return new Date(t).toTimeString().slice(0,8)}catch(e){return""}};
+// Debug views span days, so a bare HH:MM:SS is ambiguous the moment you scroll back.
+// Local time for the operator, full original UTC stamp in the tooltip.
+const stamp=t=>{try{const d=new Date(t),p=n=>String(n).padStart(2,"0");
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} `+
+         `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;}catch(e){return""}};
 const kb=n=>n<1024?n+" B":(n/1024).toFixed(1)+" KB";
 let tok="", ctl=null, activeRoom=null, meta={}, caps={};
 
@@ -193,14 +199,14 @@ async function getFile(id,name){
 let chatN=0;
 function chat(m){
   const d=document.createElement("div");d.className="cm";
-  d.innerHTML=`<div class="h"><span class="a">${esc(m.author)}</span><span class="t">${hhmm(m.ts)}</span>`+
+  d.innerHTML=`<div class="h"><span class="a">${esc(m.author)}</span><span class="t" title="${esc(m.ts)}">${stamp(m.ts)}</span>`+
               `<span class="rt">#${m.id}${m.reply_to?" ↳#"+m.reply_to:""}</span></div>`+
               `<div class="b">${esc(m.body)}</div>`;
-  $("#chat").appendChild(d);$("#chat").scrollTop=$("#chat").scrollHeight;$("#ccnt").textContent="("+(++chatN)+")";
+  $("#chat").appendChild(d);$("#ccnt").textContent="("+(++chatN)+")";
 }
 function activity(e){
   const d=document.createElement("div");d.className="ev";
-  d.innerHTML=`<span class="t">${hhmm(e.ts)}</span><span class="a">${esc(e.actor)}</span>`+
+  d.innerHTML=`<span class="t" title="${esc(e.ts)}">${stamp(e.ts)}</span><span class="a">${esc(e.actor)}</span>`+
               `<span class="k">${esc(e.kind)}</span>`+
               `<span class="d">${e.task_id?"#"+e.task_id+" ":""}${esc(e.detail)}</span>`;
   $("#log").appendChild(d);

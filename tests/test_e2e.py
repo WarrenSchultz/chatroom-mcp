@@ -593,6 +593,16 @@ def main() -> int:
             # navigator.clipboard is undefined outside a secure context, and these
             # consoles are LAN-only so plain HTTP on a LAN address is the normal way to
             # reach them. A copy button that only calls it silently does nothing there.
+            # A debug view spanning days needs the date, not just a wall-clock time.
+            if page == "dashboard.html":
+                check("dashboard timestamps include the date, not just HH:MM:SS",
+                      "getFullYear()" in code and "toTimeString" not in code,
+                      "still time-only")
+                check("both live panels render newest-first",
+                      "#log,#chat{display:flex;flex-direction:column-reverse}" in code,
+                      "chat or log still oldest-first")
+                check("chat no longer force-scrolls away from the newest message",
+                      "scrollTop=$(\"#chat\").scrollHeight" not in code)
             if "navigator.clipboard" in code:
                 check(f"{page}: clipboard use has a non-secure-context fallback",
                       "execCommand" in code and "isSecureContext" in code,

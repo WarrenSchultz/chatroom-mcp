@@ -105,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
                         if event == "activity":
                             k = payload["kind"]
                             print(
-                                paint(payload["ts"][11:19], "dim", colour) + "  "
+                                paint(payload["ts"][:19].replace("T", " "), "dim", colour) + "  "
                                 + paint(f"{payload['actor']:<14}", "acc", colour) + " "
                                 + paint(f"{k:<14}", KIND_COLOUR.get(k, "warn"), colour) + " "
                                 + (f"#{payload['task_id']} " if payload["task_id"] else "")
@@ -114,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
                             )
                         elif event == "chat":
                             print(
-                                paint(payload["ts"][11:19], "dim", colour) + "  "
+                                paint(payload["ts"][:19].replace("T", " "), "dim", colour) + "  "
                                 + paint(f"{payload['author']:<14}", "acc", colour) + " "
                                 + paint("chat", "b", colour)
                                 + (f" ↳#{payload['reply_to']}" if payload.get("reply_to") else "")
