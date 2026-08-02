@@ -63,6 +63,9 @@
  .tabs button.on{color:var(--acc);border-bottom-color:var(--acc)}
  .pane{display:none} .pane.on{display:block}
  .pref{font-size:11px;color:var(--ok);margin-left:6px}
+ .hrow{display:flex;align-items:center;gap:10px}
+ .opt{margin-left:auto;display:flex;gap:5px;align-items:center;cursor:pointer;
+      font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim)}
 </style>
 
 <header>
@@ -108,7 +111,10 @@
   </section>
 
   <section class="wide">
-    <h2>Tokens</h2>
+    <h2 class="hrow">Tokens
+      <label class="opt"><input type="checkbox" id="showRev"> show revoked
+        <span id="revCount" class="muted"></span></label>
+    </h2>
     <table><thead><tr><th>agent</th><th>rooms</th><th>flags</th><th>created</th><th>last seen</th><th></th></tr></thead>
       <tbody id="tokens"></tbody></table>
   </section>
@@ -167,7 +173,13 @@ function drawRooms(){
 }
 
 function drawTokens(){
-  $("#tokens").innerHTML=state.tokens.map(t=>{
+  // Revoked rows are permanent history — they are never deleted, so on a long-lived
+  // instance they crowd out the tokens you can actually act on. Hidden by default,
+  // with the count kept visible so it is clear they exist rather than being lost.
+  const nRevoked=state.tokens.filter(t=>t.revoked).length;
+  $("#revCount").textContent=nRevoked?`(${nRevoked})`:"(none)";
+  const rows=$("#showRev").checked?state.tokens:state.tokens.filter(t=>!t.revoked);
+  $("#tokens").innerHTML=rows.map(t=>{
     const flags=[t.revoked?'<span class="tag rev">revoked</span>':"",
       t.admin?'<span class="tag admin">admin</span>':"",
       t.readonly?'<span class="tag ro">read-only</span>':"",
@@ -179,7 +191,10 @@ function drawTokens(){
       <td class="muted">${esc((t.created_ts||"").slice(0,16))}</td>
       <td class="muted">${esc(t.last_seen?t.last_seen.slice(0,16):"never")}</td>
       <td style="text-align:right">${t.revoked?"":`<button class="bad" data-rev="${esc(t.agent)}">revoke</button>`}</td></tr>`;
-  }).join("") || `<tr><td colspan="6" class="muted">no tokens</td></tr>`;
+  }).join("") || `<tr><td colspan="6" class="muted">${
+      nRevoked && !$("#showRev").checked
+        ? `no active tokens — ${nRevoked} revoked, tick "show revoked" to see them`
+        : "no tokens"}</td></tr>`;
   $("#tokens").querySelectorAll("[data-rev]").forEach(b=>b.onclick=()=>revoke(b.dataset.rev));
 }
 
@@ -344,6 +359,7 @@ $("#go").onclick=async()=>{ tok=$("#tok").value.trim();
 $("#tok").addEventListener("keydown",e=>{ if(e.key==="Enter") $("#go").click(); });
 $("#mtGo").onclick=mint;
 $("#nrAdd").onclick=addRoom;
+$("#showRev").onchange=drawTokens;
 $("#mClose").onclick=()=>{$("#veil").hidden=true;};
 $("#veil").onclick=e=>{ if(e.target.id==="veil") $("#veil").hidden=true; };
 document.addEventListener("keydown",e=>{ if(e.key==="Escape") $("#veil").hidden=true; });
