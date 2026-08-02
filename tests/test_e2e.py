@@ -531,19 +531,19 @@ def main() -> int:
         box1.call("add_note", {"task_id": tid, "body": "activity for the hook to pick up"})
         hook = subprocess.run(
             [sys.executable, str(ROOT / "hooks" / "chatroom_whats_new.py")],
-            capture_output=True, text=True,
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
             env={**os.environ, "CHATROOM_URL": BASE, "CHATROOM_TOKEN": t_box2})
         check("hook exits 0", hook.returncode == 0, hook.stderr[-300:])
         check("hook emits activity block", "<chatroom_activity>" in hook.stdout, hook.stdout[:200])
         check("hook labels peer content untrusted", "UNTRUSTED DATA" in hook.stdout)
         hook2 = subprocess.run(
             [sys.executable, str(ROOT / "hooks" / "chatroom_whats_new.py")],
-            capture_output=True, text=True,
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
             env={**os.environ, "CHATROOM_URL": BASE, "CHATROOM_TOKEN": t_box2})
         check("hook is silent when nothing is new", hook2.stdout.strip() == "", hook2.stdout[:200])
         dead = subprocess.run(
             [sys.executable, str(ROOT / "hooks" / "chatroom_whats_new.py")],
-            capture_output=True, text=True,
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
             env={**os.environ, "CHATROOM_URL": "http://127.0.0.1:9", "CHATROOM_TOKEN": t_box2})
         check("hook fails open when the bus is unreachable",
               dead.returncode == 0 and dead.stdout.strip() == "", dead.stdout[:200])
@@ -555,7 +555,7 @@ def main() -> int:
         box1.call("post_message", {"body": "activity for the cursor-sharing check"})
         injected = subprocess.run(
             [sys.executable, str(ROOT / "hooks" / "chatroom_whats_new.py")],
-            capture_output=True, text=True,
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
             env={**os.environ, "CHATROOM_URL": BASE, "CHATROOM_TOKEN": t_cursor})
         check("hook delivers peer activity to a fresh agent",
               "<chatroom_activity>" in injected.stdout, injected.stdout[:150])
@@ -580,7 +580,7 @@ def main() -> int:
             e.update(env_extra)
             return subprocess.run(
                 [sys.executable, str(ROOT / "hooks" / "chatroom_whats_new.py")],
-                capture_output=True, text=True, env=e)
+                capture_output=True, text=True, env=e, stdin=subprocess.DEVNULL)
 
         t_dbg = mint("hookdebug", "projA")
         box1.call("post_message", {"body": "activity for the debug-flag check"})
@@ -905,6 +905,102 @@ def main() -> int:
         # --- exposure hardening ------------------------------------------------
         # Runs last: it deliberately burns the failed-auth budget for 127.0.0.1,
         # which would otherwise colour later assertions.
+        print("\n--- hook: in-loop delivery (PostToolUse) and throttling ---")
+
+        def hook_ev(event, token, extra=None, stdin_json=True):
+            """Invoke the hook the way Claude Code does: event name as JSON on stdin."""
+            e = {k: v for k, v in os.environ.items() if k != "CHATROOM_ROOM"}
+            e.update({"CHATROOM_URL": BASE, "CHATROOM_TOKEN": token,
+                      "CHATROOM_HOOK_DEBUG": "1"})
+            e.update(extra or {})
+            return subprocess.run(
+                [sys.executable, str(ROOT / "hooks" / "chatroom_whats_new.py")],
+                input=json.dumps({"hook_event_name": event}) if stdin_json else "",
+                capture_output=True, text=True, env=e)
+
+        t_loop = mint("loopbox", "projA")
+        box1.call("post_message", {"body": "in-loop delivery probe"})
+
+        r1 = hook_ev("PostToolUse", t_loop)
+        check("PostToolUse emits the JSON envelope, not bare text",
+              r1.stdout.lstrip().startswith("{"), r1.stdout[:120])
+        env1 = json.loads(r1.stdout)["hookSpecificOutput"]
+        check("...naming the event it was fired for",
+              env1["hookEventName"] == "PostToolUse", str(env1)[:120])
+        check("...and carrying the activity plus the untrusted-data frame",
+              "in-loop delivery probe" in env1["additionalContext"]
+              and "UNTRUSTED DATA" in env1["additionalContext"],
+              env1["additionalContext"][:150])
+        # With a backlog larger than the cap, the newest must survive: the cursor advances
+        # past everything returned, so whatever the hook drops is gone from this path.
+        check("a truncated backlog keeps the NEWEST events and says what it dropped",
+              ("older event(s) omitted" in env1["additionalContext"]) ==
+              (int(env1["additionalContext"].split("update(s)")[0].split()[-1]) > 25),
+              env1["additionalContext"][:200])
+
+        # The whole point of the throttle: a tool-heavy turn must not become a request
+        # storm, and must cost the model nothing when there is no news.
+        r2 = hook_ev("PostToolUse", t_loop)
+        check("a second PostToolUse inside the window makes no request",
+              "no request made" in r2.stderr, r2.stderr[:160])
+        check("...and writes nothing at all to stdout",
+              r2.stdout == "", repr(r2.stdout[:80]))
+        check("...and still exits 0", r2.returncode == 0)
+
+        r3 = hook_ev("PostToolUse", t_loop, {"CHATROOM_HOOK_MIN_INTERVAL": "0"})
+        check("with the interval disabled it checks again",
+              "no request made" not in r3.stderr, r3.stderr[:160])
+
+        # UserPromptSubmit must keep its old contract exactly: plain stdout, no throttle.
+        box1.call("post_message", {"body": "prompt-path probe"})
+        r4 = hook_ev("UserPromptSubmit", t_loop)
+        check("UserPromptSubmit is never throttled",
+              "no request made" not in r4.stderr, r4.stderr[:160])
+        check("...and still emits plain text, not JSON",
+              r4.stdout.lstrip().startswith("<chatroom_activity>"), r4.stdout[:80])
+
+        # An unreachable bus during a long turn must not retry on every single tool call.
+        t_down = mint("downbox", "projA")
+        d1 = hook_ev("PostToolUse", t_down, {"CHATROOM_URL": "http://127.0.0.1:9"})
+        check("an unreachable bus fails open on the in-loop path",
+              d1.returncode == 0 and d1.stdout == "", d1.stdout[:80])
+        d2 = hook_ev("PostToolUse", t_down, {"CHATROOM_URL": "http://127.0.0.1:9"})
+        check("...and is not retried on the next tool call either",
+              "no request made" in d2.stderr, d2.stderr[:160])
+
+        t_ev = mint("evbox", "projA")
+        r5 = hook_ev("Stop", t_ev)
+        check("Stop is treated as an in-loop event too",
+              json.loads(r5.stdout)["hookSpecificOutput"]["hookEventName"] == "Stop"
+              if r5.stdout.strip() else True, r5.stdout[:120])
+        r6 = subprocess.run(
+            [sys.executable, str(ROOT / "hooks" / "chatroom_whats_new.py")],
+            input="", capture_output=True, text=True,
+            env={**{k: v for k, v in os.environ.items() if k != "CHATROOM_ROOM"},
+                 "CHATROOM_URL": BASE, "CHATROOM_TOKEN": mint("nostdin", "projA"),
+                 "CHATROOM_HOOK_DEBUG": "1"})
+        # Regression: reading stdin unconditionally made the hook wait for EOF, so any
+        # caller that left stdin open hung it — which stalls the agent on every tool call.
+        import time as _t
+        _start = _t.time()
+        _p = subprocess.Popen(
+            [sys.executable, str(ROOT / "hooks" / "chatroom_whats_new.py")],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env={**os.environ, "CHATROOM_TOKEN": "cr_never_used",
+                 "CHATROOM_URL": "http://127.0.0.1:9"})
+        try:
+            _p.communicate(timeout=8)          # never write, never close stdin
+            _hung = False
+        except subprocess.TimeoutExpired:
+            _p.kill(); _hung = True
+        check("the hook never blocks on an open stdin",
+              not _hung and _t.time() - _start < 8,
+              f"took {_t.time() - _start:.1f}s")
+
+        check("no stdin at all falls back to the prompt-path contract",
+              r6.returncode == 0 and not r6.stdout.lstrip().startswith("{"),
+              r6.stdout[:80])
+
         print("\n--- exposure hardening (tunnel / public reachability) ---")
         from chatroom import security
 

@@ -12,8 +12,11 @@ Two surfaces share one room:
   that must be claimed, tracked, and handed off ("please host the poller" → claim → done).
   Exactly one agent can win a contended task — the thing a shared file/git directory can't do.
 
-An included **UserPromptSubmit hook** injects unread peer activity into each agent's context
-automatically, so coordination happens whether or not the model thinks to poll.
+An included **hook** injects unread peer activity into each agent's context automatically,
+so coordination happens whether or not the model thinks to poll. Wire it to
+`UserPromptSubmit` for delivery when a human prompts, and/or `PostToolUse` for delivery
+*during* a long autonomous run — the in-loop path is throttled to one check a minute and
+stays silent unless something actually happened.
 
 Built on the official Python MCP SDK (`mcp` 2.0.0), served over streamable HTTP in stateless
 JSON-response mode — every tool call is a self-contained POST, so it sits behind any proxy
@@ -235,7 +238,7 @@ extra rooms. Tokens are shown once and stored only as SHA-256. See
 docker compose run --rm chatroom python tests/test_e2e.py
 ```
 
-Spins up a live server and exercises 201 assertions over the same JSON-RPC path Claude Code
+Spins up a live server and exercises 216 assertions over the same JSON-RPC path Claude Code
 uses: token→identity, room isolation, concurrent claim contention, version conflicts, cursor
 advance, read-only enforcement, chat post/read/threading/isolation, REST + SSE surfaces, hook
 behaviour (including fail-open plus its debug diagnostics), revocation, the admin console's
