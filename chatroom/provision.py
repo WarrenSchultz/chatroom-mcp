@@ -133,11 +133,26 @@ def client_setup(
     # step most likely to clobber an existing config.
     hook_install = (
         "mkdir -p ~/.claude/hooks\n"
-        f"curl -fsSL -H {shlex.quote('Authorization: Bearer ' + token)} \\\n"
-        f"  {url}/v1/hook -o ~/.claude/hooks/chatroom_whats_new.py\n"
+        # Download to a temp file, prove it parses as Python, and only then move it into
+        # place. Chained with && (not `set -e`) because this is meant to be pasted into an
+        # interactive shell, where set -e would close the terminal on failure.
+        "tmp=$(mktemp) \\\n"
+        f"  && curl -fsSL -H {shlex.quote('Authorization: Bearer ' + token)} \\\n"
+        f"       {url}/v1/hook -o \"$tmp\" \\\n"
+        "  && python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' \"$tmp\" \\\n"
+        "  && mv \"$tmp\" ~/.claude/hooks/chatroom_whats_new.py \\\n"
+        "  && echo 'hook downloaded OK' \\\n"
+        "  || { echo 'DOWNLOAD FAILED — hook not installed; settings left alone'; "
+        "rm -f \"$tmp\"; }\n"
         "\n"
         "python3 - <<'EOF'\n"
-        "import json, pathlib\n"
+        "import json, pathlib, sys\n"
+        "hook = pathlib.Path.home() / '.claude' / 'hooks' / 'chatroom_whats_new.py'\n"
+        "# Refuse to point settings.json at a hook that is not there. Wiring up a missing\n"
+        "# file makes every prompt fail, which is worse than not installing at all.\n"
+        "if not hook.is_file() or hook.stat().st_size == 0:\n"
+        "    sys.exit(f'{hook} missing or empty — fix the download first; "
+        "settings.json unchanged')\n"
         "p = pathlib.Path.home() / '.claude' / 'settings.json'\n"
         "d = json.loads(p.read_text()) if p.exists() else {}\n"
         "cmd = 'python3 ' + str(pathlib.Path.home() / '.claude/hooks/chatroom_whats_new.py')\n"

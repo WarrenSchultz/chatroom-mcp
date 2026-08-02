@@ -618,6 +618,17 @@ def main() -> int:
               and "cp hooks/" not in setup["hook_install"], setup["hook_install"][:160])
         check("hook install carries the token on the fetch (survives an edge auth rule)",
               "Authorization: Bearer" in setup["hook_install"])
+        # A failed download must not leave settings.json pointing at a hook that is not
+        # there — that turns one missing file into a hook error on every single prompt.
+        check("hook install aborts the settings merge if the download failed",
+              "missing or empty" in setup["hook_install"]
+              and "DOWNLOAD FAILED" in setup["hook_install"], setup["hook_install"][:200])
+        check("hook install validates the download parses as python before installing",
+              "ast.parse" in setup["hook_install"])
+        check("hook install stages via a temp file, not straight over the target",
+              "mktemp" in setup["hook_install"] and "mv " in setup["hook_install"])
+        check("hook install avoids set -e (it is pasted into an interactive shell)",
+              "set -e" not in setup["hook_install"])
         check("hook verify passes env explicitly, not relying on the shell",
               "CHATROOM_HOOK_DEBUG=1" in setup["hook_install"]
               and setup["hook_install"].count("CHATROOM_TOKEN=") >= 1
