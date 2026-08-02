@@ -21,9 +21,12 @@
   portless form a tunnel sends, and a long-poll ceiling under Cloudflare's 100s edge timeout.
 - **Admin console** — `/admin` (opt-in via `CHATROOM_ADMIN_API`) for room and token
   lifecycle from a browser, requiring a whole-server admin token (`--admin --all-rooms`).
-  Minting also generates the target box's setup text — `claude mcp add`, `.mcp.json`, hook
-  env, and a paste-to-agent brief — with the URL derived from however the console was
-  reached, so a LAN visit yields a LAN URL and a tunnel visit the public hostname.
+  Minting also generates the target box's setup text — `claude mcp add`, `.mcp.json`, a
+  hook install that fetches from `GET /v1/hook` rather than assuming a checkout, and a
+  paste-to-agent brief — for **both** the LAN and public URLs, since the console is
+  LAN-only and so cannot know which route the box being provisioned needs. Revoked tokens
+  are hidden by default and purgeable (by age, or all), with live tokens structurally
+  excluded from the delete. The consoles themselves refuse public-side requests.
 
 ## Ideas not yet built
 

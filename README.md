@@ -104,6 +104,11 @@ their request can never reveal the tunnel hostname. Each route gets:
   untrusted-data rule — so a new agent can wire itself up and understand the room
 - the equivalent `admin add-token` command, for your records
 
+Revoked tokens are hidden from the list by default (with the count shown) and can be
+**purged** — permanently deleting those rows, optionally only ones revoked more than N
+days ago. Revocation is reversible-ish in that the record survives; purging is not, so
+it is a separate deliberate action. Live tokens can never be removed by it.
+
 **It is off by default: `CHATROOM_ADMIN_API=on`.** That is deliberate. Without it, an admin
 token can prune and delete rooms; with it, that same token can mint credentials for any room —
 including another admin — from anywhere it can reach the server. Minting has always required
@@ -187,7 +192,7 @@ extra rooms. Tokens are shown once and stored only as SHA-256. See
 docker compose run --rm chatroom python tests/test_e2e.py
 ```
 
-Spins up a live server and exercises 163 assertions over the same JSON-RPC path Claude Code
+Spins up a live server and exercises 171 assertions over the same JSON-RPC path Claude Code
 uses: token→identity, room isolation, concurrent claim contention, version conflicts, cursor
 advance, read-only enforcement, chat post/read/threading/isolation, REST + SSE surfaces, hook
 behaviour (including fail-open plus its debug diagnostics), revocation, the admin console's

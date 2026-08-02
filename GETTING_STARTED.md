@@ -147,7 +147,8 @@ console can do and the security trade-off. Note that a room-scoped `--admin` tok
 docker compose exec chatroom python -m chatroom.admin list-rooms
 docker compose exec chatroom python -m chatroom.admin list-tokens
 docker compose exec chatroom python -m chatroom.admin revoke --agent <agent>
-docker compose run --rm chatroom python tests/test_e2e.py     # full self-test (163 assertions)
+docker compose exec chatroom python -m chatroom.admin purge-tokens --older-than-days 90 --yes
+docker compose run --rm chatroom python tests/test_e2e.py     # full self-test (171 assertions)
 ```
 Back up the DB safely while running:
 

@@ -1254,11 +1254,47 @@ async def admin_revoke_token(request: Request) -> JSONResponse:
                           "pass confirm_self=true if you mean it"},
                 status_code=409,
             )
-        cur = conn.execute("UPDATE tokens SET revoked=1 WHERE agent_name=? AND revoked=0",
-                           (agent,))
-        n = cur.rowcount or 0
+        n = db.revoke_agent(conn, agent)
         _audit("revoke", ident, f"agent={agent} tokens={n}")
         return JSONResponse({"ok": True, "agent": agent, "revoked": n})
+    finally:
+        conn.close()
+
+
+@mcp.custom_route("/v1/admin/tokens/purge", methods=["POST"])
+async def admin_purge_tokens(request: Request) -> JSONResponse:
+    """Permanently delete revoked token rows.
+
+    Revoked rows are the audit trail — they are how you know a credential existed and
+    when it stopped working — so this is destructive in a way revocation is not, and is
+    a separate explicit action rather than something revoke does implicitly.
+    `older_than_days` keeps recent revocations while clearing out old noise.
+    """
+    got = _server_admin(request)
+    if isinstance(got, JSONResponse):
+        return got
+    conn, ident = got
+    try:
+        body = await _json_body(request)
+        raw = body.get("older_than_days")
+        try:
+            days = int(raw) if raw not in (None, "") else 0
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "older_than_days must be a whole number"},
+                                status_code=400)
+        if days < 0:
+            return JSONResponse({"error": "older_than_days cannot be negative"},
+                                status_code=400)
+        before = conn.execute("SELECT COUNT(*) c FROM tokens WHERE revoked=1").fetchone()["c"]
+        removed = db.purge_revoked_tokens(conn, days or None)
+        live = conn.execute("SELECT COUNT(*) c FROM tokens WHERE revoked=0").fetchone()["c"]
+        _audit("purge-tokens", ident,
+               f"removed {removed} of {before} revoked row(s), "
+               f"older_than_days={days or 'all'}; {live} live token(s) untouched")
+        return JSONResponse({"ok": True, "removed": removed,
+                             "revoked_remaining": before - removed,
+                             "live_tokens": live,
+                             "older_than_days": days or None})
     finally:
         conn.close()
 

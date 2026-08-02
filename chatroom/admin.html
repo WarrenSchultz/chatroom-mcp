@@ -114,6 +114,7 @@
     <h2 class="hrow">Tokens
       <label class="opt"><input type="checkbox" id="showRev"> show revoked
         <span id="revCount" class="muted"></span></label>
+      <button class="ghost" id="purgeRev" hidden>purge revoked…</button>
     </h2>
     <table><thead><tr><th>agent</th><th>rooms</th><th>flags</th><th>created</th><th>last seen</th><th></th></tr></thead>
       <tbody id="tokens"></tbody></table>
@@ -178,6 +179,7 @@ function drawTokens(){
   // with the count kept visible so it is clear they exist rather than being lost.
   const nRevoked=state.tokens.filter(t=>t.revoked).length;
   $("#revCount").textContent=nRevoked?`(${nRevoked})`:"(none)";
+  $("#purgeRev").hidden=!nRevoked;
   const rows=$("#showRev").checked?state.tokens:state.tokens.filter(t=>!t.revoked);
   $("#tokens").innerHTML=rows.map(t=>{
     const flags=[t.revoked?'<span class="tag rev">revoked</span>':"",
@@ -320,6 +322,28 @@ async function revoke(agent){
   }catch(e){ note(e.message,"err"); }
 }
 
+async function purgeRevoked(){
+  const n=state.tokens.filter(t=>t.revoked).length;
+  if(!n) return;
+  const v=prompt(
+    `Permanently DELETE revoked token rows.\n\n`+
+    `${n} revoked row(s) present. These are the audit trail — they record that a\n`+
+    `credential existed and when it stopped working. Deleting them cannot be undone.\n`+
+    `Live tokens are never affected.\n\n`+
+    `Purge revocations older than how many days?  (0 = purge all ${n})`, "0");
+  if(v===null) return;
+  const days=parseInt(v,10)||0;
+  if(!confirm(days? `Delete revoked rows older than ${days} day(s)?`
+                  : `Delete ALL ${n} revoked rows?`)) return;
+  try{
+    const d=await api("/v1/admin/tokens/purge",
+      {method:"POST",body:JSON.stringify({older_than_days:days})});
+    note(`purged ${d.removed} revoked row(s); ${d.revoked_remaining} kept, `+
+         `${d.live_tokens} live token(s) untouched`,"ok");
+    await load();
+  }catch(e){ note(e.message,"err"); }
+}
+
 async function delRoom(room){
   if(!confirm(`Permanently delete room "${room}" and ALL of its tasks, chat, files and events? This cannot be undone. Tokens are left alone.`)) return;
   if(prompt(`Type the room name to confirm:`)!==room){ note("name did not match — nothing deleted"); return; }
@@ -360,6 +384,7 @@ $("#tok").addEventListener("keydown",e=>{ if(e.key==="Enter") $("#go").click(); 
 $("#mtGo").onclick=mint;
 $("#nrAdd").onclick=addRoom;
 $("#showRev").onchange=drawTokens;
+$("#purgeRev").onclick=purgeRevoked;
 $("#mClose").onclick=()=>{$("#veil").hidden=true;};
 $("#veil").onclick=e=>{ if(e.target.id==="veil") $("#veil").hidden=true; };
 document.addEventListener("keydown",e=>{ if(e.key==="Escape") $("#veil").hidden=true; });

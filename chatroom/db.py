@@ -199,6 +199,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tokens ADD COLUMN admin INTEGER NOT NULL DEFAULT 0")
     if "all_rooms" not in tcols:
         conn.execute("ALTER TABLE tokens ADD COLUMN all_rooms INTEGER NOT NULL DEFAULT 0")
+    if "revoked_ts" not in tcols:
+        # When the token was revoked, so "purge revocations older than N days" can mean
+        # what it says. Rows revoked before this column existed keep NULL; readers fall
+        # back to created_ts for those rather than treating them as age zero.
+        conn.execute("ALTER TABLE tokens ADD COLUMN revoked_ts TEXT")
     rcols = {r["name"] for r in conn.execute("PRAGMA table_info(rooms)")}
     for col, decl in (
         ("description", "TEXT"),
@@ -242,6 +247,38 @@ def new_token() -> str:
 
 def hash_token(token: str) -> str:
     return hashlib.sha256(token.strip().encode()).hexdigest()
+
+
+def revoke_agent(conn: sqlite3.Connection, agent: str) -> int:
+    """Revoke every live token for an agent. Returns how many were revoked.
+
+    Shared by the CLI and the admin API so both stamp revoked_ts identically; a
+    revocation recorded by one and not the other would quietly break age-based purging.
+    """
+    cur = conn.execute(
+        "UPDATE tokens SET revoked=1, revoked_ts=? WHERE agent_name=? AND revoked=0",
+        (now(), agent),
+    )
+    return cur.rowcount or 0
+
+
+def purge_revoked_tokens(conn: sqlite3.Connection, older_than_days: int | None = None) -> int:
+    """Delete revoked token rows. Returns how many were removed.
+
+    `revoked=1` is in the WHERE clause unconditionally — a live credential must never be
+    removable by this path, whatever the age filter says. Age is measured from revoked_ts,
+    falling back to created_ts for rows revoked before that column existed.
+    """
+    if older_than_days and int(older_than_days) > 0:
+        cutoff = (dt.datetime.now(dt.timezone.utc)
+                  - dt.timedelta(days=int(older_than_days))).isoformat(timespec="seconds")
+        cur = conn.execute(
+            "DELETE FROM tokens WHERE revoked=1 AND COALESCE(revoked_ts, created_ts) < ?",
+            (cutoff,),
+        )
+    else:
+        cur = conn.execute("DELETE FROM tokens WHERE revoked=1")
+    return cur.rowcount or 0
 
 
 class AuthError(Exception):

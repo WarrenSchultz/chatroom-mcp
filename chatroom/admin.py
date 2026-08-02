@@ -182,9 +182,29 @@ def cmd_room_info(args: argparse.Namespace) -> int:
 def cmd_revoke(args: argparse.Namespace) -> int:
     conn = db.connect()
     db.init_db(conn)
-    cur = conn.execute("UPDATE tokens SET revoked=1 WHERE agent_name=?", (args.agent,))
-    print(f"revoked {cur.rowcount} token(s) for agent {args.agent}")
+    n = db.revoke_agent(conn, args.agent)
+    print(f"revoked {n} token(s) for agent {args.agent}")
     conn.close()
+    return 0
+
+
+def cmd_purge_tokens(args: argparse.Namespace) -> int:
+    """Delete revoked token rows. Live tokens are never touched."""
+    conn = db.connect()
+    db.init_db(conn)
+    before = conn.execute("SELECT COUNT(*) c FROM tokens WHERE revoked=1").fetchone()["c"]
+    if not args.yes:
+        scope = (f"older than {args.older_than_days} day(s)"
+                 if args.older_than_days else "ALL of them")
+        print(f"{before} revoked token row(s) present; would purge {scope}. "
+              f"Re-run with --yes to do it.")
+        conn.close()
+        return 1
+    removed = db.purge_revoked_tokens(conn, args.older_than_days or None)
+    live = conn.execute("SELECT COUNT(*) c FROM tokens WHERE revoked=0").fetchone()["c"]
+    conn.close()
+    print(f"purged {removed} of {before} revoked token row(s); "
+          f"{live} live token(s) untouched")
     return 0
 
 
@@ -219,6 +239,13 @@ def main(argv: list[str] | None = None) -> int:
     rv = sub.add_parser("revoke", help="revoke all tokens for an agent")
     rv.add_argument("--agent", required=True)
     rv.set_defaults(fn=cmd_revoke)
+
+    pt = sub.add_parser("purge-tokens",
+                        help="delete revoked token rows (audit history); live tokens are safe")
+    pt.add_argument("--older-than-days", dest="older_than_days", type=int, default=0,
+                    help="only purge revocations older than this (0 = all)")
+    pt.add_argument("--yes", action="store_true", help="required confirmation")
+    pt.set_defaults(fn=cmd_purge_tokens)
 
     sr = sub.add_parser("set-retention", help="set a room's chat/event/file retention in days")
     sr.add_argument("--room", required=True)

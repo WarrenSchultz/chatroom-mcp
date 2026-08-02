@@ -717,6 +717,43 @@ def main() -> int:
                   rc.get(f"{abase}/v1/hook",
                          headers={"Authorization": f"Bearer {t_box1}",
                                   "CF-Ray": "0000000000000000-TEST"}).status_code == 200)
+            # Purge is destructive in a way revoke is not, so the invariant that matters
+            # is that a LIVE token can never be removed by it, whatever the age filter says.
+            t_doomed = mint("doomed", "projA")
+            t_keeper = mint("keeper", "projA")
+            rc.post(f"{abase}/v1/admin/tokens/revoke", headers=sah, json={"agent": "doomed"})
+            # Snapshot the live set *after* the revoke, so the comparison is "purge changed
+            # nothing that was live", not "purge changed nothing at all".
+            live_before = {x["agent"] for x in rc.get(f"{abase}/v1/admin/state",
+                                                      headers=sah).json()["tokens"]
+                           if not x["revoked"]}
+            far = rc.post(f"{abase}/v1/admin/tokens/purge", headers=sah,
+                          json={"older_than_days": 3650}).json()
+            check("purge with a long age filter spares a just-revoked row",
+                  far["removed"] == 0 and far["revoked_remaining"] >= 1, str(far))
+            allp = rc.post(f"{abase}/v1/admin/tokens/purge", headers=sah,
+                           json={"older_than_days": 0}).json()
+            check("purge with no age filter removes revoked rows",
+                  allp["removed"] >= 1 and allp["revoked_remaining"] == 0, str(allp))
+            after = rc.get(f"{abase}/v1/admin/state", headers=sah).json()["tokens"]
+            live_after = {x["agent"] for x in after if not x["revoked"]}
+            check("purge left every LIVE token intact",
+                  live_after == live_before,
+                  f"lost {live_before - live_after}, gained {live_after - live_before}")
+            check("...including the one whose peer was purged",
+                  Agent(t_keeper).call("list_tasks").get("you_are") == "keeper")
+            check("the purged agent is gone from the listing entirely",
+                  not any(x["agent"] == "doomed" for x in after))
+            check("purge rejects a non-numeric age",
+                  rc.post(f"{abase}/v1/admin/tokens/purge", headers=sah,
+                          json={"older_than_days": "soon"}).status_code == 400)
+            check("purge rejects a negative age",
+                  rc.post(f"{abase}/v1/admin/tokens/purge", headers=sah,
+                          json={"older_than_days": -5}).status_code == 400)
+            check("purge needs a whole-server admin like every other admin route",
+                  rc.post(f"{abase}/v1/admin/tokens/purge",
+                          headers={"Authorization": f"Bearer {t_box1}"},
+                          json={}).status_code == 403)
             check("admin can delete a room it created",
                   rc.delete(f"{abase}/v1/rooms/adminmade", headers=sah).json()["ok"])
 
