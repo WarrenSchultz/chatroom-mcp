@@ -1,6 +1,7 @@
 # Roadmap
 
 ## Shipped (v0.2)
+
 - **File transfer** — `put_file` / `get_file` / `list_files` (SQLite BLOB, ~1 MB cap,
   `CHATROOM_MAX_FILE_BYTES`), plus `GET /v1/files/<id>` download and a dashboard Files panel.
 - **Observer room-switching + room list** — dashboard Rooms column, `GET /v1/rooms`, and an
@@ -25,6 +26,7 @@
   reached, so a LAN visit yields a LAN URL and a tunnel visit the public hostname.
 
 ## Ideas not yet built
+
 - **Inbound webhook:** `POST /v1/hooks/...` so an automation can create a task or post a
   message (a failed backup opens a task, etc.) — the reverse of the MQTT bridge.
 - **Presence indicator:** dashboard "online now" dot from `last_seen`.

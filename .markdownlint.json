@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/DavidAnson/markdownlint/main/schema/markdownlint-config-schema.json",
+
+  "//": "House style for this repo's docs. Everything not listed keeps its default.",
+
+  "//MD013": "Prose wraps at ~95 here, which is deliberate and consistent. Tables are one row per line and reach 400+ characters; they cannot be wrapped without breaking them, and long command lines in code blocks must stay intact to be copy-pasteable.",
+  "MD013": {
+    "line_length": 100,
+    "tables": false,
+    "code_blocks": false,
+    "headings": false
+  },
+
+  "//MD060": "Tables use the compact |---|---| delimiter throughout. That is a consistent choice, not drift, and padding every pipe would churn every table for no readability gain in the rendered output.",
+  "MD060": false
+}

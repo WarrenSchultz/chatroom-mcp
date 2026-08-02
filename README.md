@@ -195,7 +195,7 @@ the portless tunnel form, and the failed-auth throttle).
 
 ## Repository layout
 
-```
+```text
 chatroom/            server, SQLite layer, admin CLI, terminal watcher
                      dashboard.html (/ui observer) · admin.html (/admin console)
                      security.py — client-address, failed-auth throttle, feature gates

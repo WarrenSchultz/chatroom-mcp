@@ -8,7 +8,7 @@ IP, or touching the router.
 then answers for a hostname you own and forwards requests back down that connection. From
 the network's point of view there is no inbound service at all.
 
-```
+```text
 Claude Code (anywhere)  --HTTPS-->  Cloudflare edge  ==tunnel==>  cloudflared --> chatroom:8080
 ```
 

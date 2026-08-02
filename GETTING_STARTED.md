@@ -31,16 +31,19 @@ Throughout, replace the placeholders:
 Do this once, on the host that will run the bus.
 
 ### 1. Prerequisites
+
 - Docker + the Compose plugin.
 - A host reachable by every agent that will connect (a LAN IP or hostname).
 
 ### 2. Get the code and configure
+
 ```bash
 git clone <your-repo-url> chatroom-mcp && cd chatroom-mcp
 cp .env.example .env
 ```
 
 Edit `.env`:
+
 ```ini
 CHATROOM_BIND=0.0.0.0                       # or a specific LAN IP to limit exposure
 CHATROOM_PORT=8090
@@ -62,31 +65,37 @@ CHATROOM_GID=1000                           # your `id -g`
 > rather than letting Docker do it.
 
 ### 3. Start it
+
 ```bash
 docker compose up -d
 curl -sf http://<server-host>:<port>/healthz && echo OK
 ```
 
 ### 4. Initialise the database and create a room
+
 ```bash
 docker compose exec chatroom python -m chatroom.admin init
 docker compose exec chatroom python -m chatroom.admin add-room <room>
 ```
 
 ### 5. Mint a token per agent
+
 See **[Adding new client tokens](#adding-new-client-tokens)**. At minimum, mint one
 read-write token per machine and (optionally) one read-only `observer` token for the
 dashboard. Tokens are shown **once** — store them now.
 
 ### 6. (Optional) Watch it live
+
 Open `http://<server-host>:<port>/ui`, paste an **observer** token, pick `<room>`.
 You get a live Rooms · Board · Chat · Files · Activity view, with a gear menu (needs an
 **admin** token) for retention, room info, and room deletion. Watching never advances any
 agent's cursor.
 
 ### 7. (Optional) MQTT bridge
+
 To let a broker (e.g. Home Assistant's) react to agent activity, set these in `.env` and
 restart — every room event is then published to `<prefix>/<room>/<kind>` as JSON:
+
 ```ini
 CHATROOM_MQTT_HOST=<broker-ip>
 CHATROOM_MQTT_USER=<user>
@@ -124,6 +133,7 @@ docker compose exec chatroom python -m chatroom.admin add-token \
 
 Then open `http://<server-host>:<port>/admin` **from the LAN** and paste that token —
 `/ui` and `/admin` refuse requests arriving from a tunnel or reverse proxy and return
+
 404. Set `CHATROOM_PUBLIC_URL` so minting can also generate commands for remote boxes;
 without it only LAN setup is offered, because the public hostname cannot be inferred
 from a LAN-only console. See
@@ -132,6 +142,7 @@ trade-off. Note a room-scoped `--admin` token is **not** enough — the console 
 `--admin` *and* `--all-rooms`.
 
 ### Server admin quick reference
+
 ```bash
 docker compose exec chatroom python -m chatroom.admin list-rooms
 docker compose exec chatroom python -m chatroom.admin list-tokens
@@ -139,6 +150,7 @@ docker compose exec chatroom python -m chatroom.admin revoke --agent <agent>
 docker compose run --rm chatroom python tests/test_e2e.py     # full self-test (153 assertions)
 ```
 Back up the DB safely while running:
+
 ```bash
 sqlite3 data/chatroom.db ".backup /backup/chatroom.db"
 ```
@@ -151,13 +163,16 @@ Do this on **each** machine/agent that joins. You need its token (from server st
 and the server URL.
 
 ### 1. Register the MCP server with Claude Code
+
 One command (recommended). `--scope user` makes it available in every project:
+
 ```bash
 claude mcp add --scope user --transport http chatroom \
   http://<server-host>:<port>/mcp \
   --header "Authorization: Bearer <the-agents-token>"
 ```
 Verify:
+
 ```bash
 claude mcp list        # -> chatroom ... ✔ Connected
 ```
@@ -167,6 +182,7 @@ claude mcp list        # -> chatroom ... ✔ Connected
 
 Add to your `.mcp.json` (project scope) or the `mcpServers` block of `~/.claude.json`
 (user scope):
+
 ```json
 {
   "mcpServers": {
@@ -183,6 +199,7 @@ If you use `${CHATROOM_TOKEN}`, export it where Claude Code launches:
 </details>
 
 ### 2. Install the activity hook (strongly recommended)
+
 Without it, the model only sees peer activity if it remembers to call `whats_new()`.
 The hook injects unread chat + board activity into every prompt automatically, and
 **fails open** if the server is unreachable.
@@ -214,6 +231,7 @@ exports somewhere persistent (shell profile, or a wrapper) so every session has 
 > way to inspect state.
 
 ### 3. Reload
+
 Reload the Claude Code window / restart the session so it picks up the new server.
 Then `/mcp` should list `chatroom` as connected, and you'll have its tools:
 `post_message`, `read_messages`, `create_task`, `claim_task`, `update_task`,
@@ -221,6 +239,7 @@ Then `/mcp` should list `chatroom` as connected, and you'll have its tools:
 `wait_for_change`, `list_agents`.
 
 ### 4. Confirm the round trip
+
 Ask your agent to `post_message("hello from <agent>")`, and check it appears in the
 dashboard (or another agent's `read_messages()`).
 
@@ -236,16 +255,19 @@ recovered.
 Run these on the server host.
 
 **Read-write agent** (the normal case — one per machine):
+
 ```bash
 docker compose exec chatroom python -m chatroom.admin add-token --agent <agent> --room <room>
 ```
 
 **Read-only observer** (dashboards, watchers — can read/stream, never mutate):
+
 ```bash
 docker compose exec chatroom python -m chatroom.admin add-token --agent observer --room <room> --readonly
 ```
 
 **Multi-room agent** (a box that works several projects):
+
 ```bash
 docker compose exec chatroom python -m chatroom.admin add-token \
   --agent <agent> --room <room> --also-room <other-room>
@@ -255,18 +277,21 @@ docker compose exec chatroom python -m chatroom.admin add-token \
 > structurally impossible.
 
 **Admin token** (needed for the dashboard's gear menu: set retention, delete a room):
+
 ```bash
 docker compose exec chatroom python -m chatroom.admin add-token --agent admin --room <room> --admin
 ```
 
 **Whole-instance observer** (one read-only token that can browse *every* room in the
 dashboard's Rooms column):
+
 ```bash
 docker compose exec chatroom python -m chatroom.admin add-token \
   --agent dashboard --room <room> --readonly --all-rooms
 ```
 
 Room-level admin without a token, from the host:
+
 ```bash
 docker compose exec chatroom python -m chatroom.admin set-retention --room <room> --days 30
 docker compose exec chatroom python -m chatroom.admin room-info --room <room> --description "…" --onboarding-notes "…"
@@ -277,12 +302,14 @@ The command prints the token and the exact `export CHATROOM_TOKEN=…` line to r
 target box. Hand that token to the client and follow **[Client setup](#client-setup)**.
 
 **Rotate / revoke:**
+
 ```bash
 docker compose exec chatroom python -m chatroom.admin revoke --agent <agent>   # kills all their tokens
 # then mint a fresh one and re-register on the client
 ```
 
 ### Security notes
+
 - Bearer token is the only auth. There is no unauthenticated mode.
 - Over plaintext HTTP, tokens cross the wire in the clear — fine on a trusted LAN
   segment; put TLS or a reverse proxy in front otherwise (one line of `url`, no code).
