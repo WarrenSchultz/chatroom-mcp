@@ -72,17 +72,16 @@ agent from working.
 
 from __future__ import annotations
 
+# Module scope holds ONLY what the suppressed path touches. urllib.request alone costs
+# ~30 ms to import and is never reached when the throttle suppresses a check — and that
+# path runs on every tool call. Measured on an idle box: full import set 40 ms, this set
+# 10 ms, bare interpreter 10 ms. Everything else is imported where it is used.
 import hashlib
-import json
 import os
-import pathlib
-import select
 import sys
-import tempfile
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
+
+__version__ = "1.1.0"
 
 TIMEOUT = 5.0
 MAX_EVENTS = 25
@@ -134,30 +133,64 @@ def _hook_event() -> str:
         # that leaves stdin open would otherwise hang this hook forever — and a hook that
         # hangs stalls the agent on every tool call. Wait briefly for data to be there,
         # then take one non-blocking chunk; the payload is a few hundred bytes.
+        import select  # noqa: PLC0415 - deferred: costs nothing on the suppressed path
         if not select.select([sys.stdin], [], [], 0.25)[0]:
             return "UserPromptSubmit"
         raw = os.read(sys.stdin.fileno(), 65536).decode("utf-8", "replace")
         if raw.strip():
+            import json  # noqa: PLC0415
             return str(json.loads(raw).get("hook_event_name") or "UserPromptSubmit")
     except Exception:
         pass
     return "UserPromptSubmit"
 
 
-def _throttle_file(base: str, token: str, room: str | None) -> pathlib.Path:
-    # Keyed on the identity whose cursor is at stake, not on the session: two sessions
-    # sharing a token share a cursor, so they should share a throttle too.
+def _throttle_file(base: str, token: str, room: str | None) -> str:
+    """Marker path. os.path rather than pathlib, and $TMPDIR rather than tempfile,
+    because both of those imports are pure cost on the path that runs most often.
+
+    Keyed on the identity whose cursor is at stake, not on the session: two sessions
+    sharing a token share a cursor, so they should share a throttle too.
+    """
     key = hashlib.sha256(f"{base}|{token}|{room or ''}".encode()).hexdigest()[:16]
-    return pathlib.Path(tempfile.gettempdir()) / f"chatroom-hook-{key}"
+    tmp = os.environ.get("TMPDIR") or "/tmp"
+    return os.path.join(tmp, f"chatroom-hook-{key}")
 
 
-def _recently_checked(path: pathlib.Path) -> float | None:
+def _recently_checked(path: str) -> float | None:
     """Seconds since the last real check, or None if it is due."""
     try:
-        age = time.time() - path.stat().st_mtime
+        age = time.time() - os.stat(path).st_mtime
     except OSError:
         return None
     return age if age < MIN_INTERVAL else None
+
+
+def _seen(path: str) -> tuple[int, bool]:
+    """(highest event id shown in-loop, whether onboarding was already shown).
+
+    Both are needed because peeking never advances the server cursor, so the server
+    keeps reporting since_id=0 and therefore keeps attaching the room's onboarding
+    block. Without remembering it locally, every in-loop check would re-inject the
+    same orientation text forever.
+    """
+    try:
+        with open(path) as fh:
+            parts = (fh.read().strip() or "0 0").split()
+        return int(parts[0]), (len(parts) > 1 and parts[1] == "1")
+    except (OSError, ValueError):
+        return 0, False
+
+
+def _mark(path: str, shown_id: int | None = None, onboarded: bool | None = None) -> None:
+    """Stamp the check time, and carry forward what has already been shown."""
+    cur_id, cur_ob = _seen(path)
+    try:
+        with open(path, "w") as fh:
+            fh.write(f"{cur_id if shown_id is None else shown_id} "
+                     f"{'1' if (cur_ob if onboarded is None else onboarded) else '0'}")
+    except OSError:
+        pass
 
 
 def _emit(event: str, text: str) -> None:
@@ -165,6 +198,7 @@ def _emit(event: str, text: str) -> None:
     if event == "UserPromptSubmit":
         print(text)
         return
+    import json  # noqa: PLC0415
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": event, "additionalContext": text}}))
 
@@ -186,12 +220,24 @@ def main() -> int:
                    "no request made")
             return 0
 
-    url = base + "/v1/whats_new"
+    # In-loop checks PEEK: they read unread activity without advancing the cursor, so an
+    # event delivered mid-turn still re-surfaces at the next prompt. Without that, an event
+    # consumed while the agent is deep in unrelated work is simply spent. Repetition is
+    # avoided locally instead — the marker records the highest id already shown in-loop.
+    peek = event in THROTTLED_EVENTS
+    import urllib.parse  # noqa: PLC0415 - past the throttle, so the cost is now justified
+    params = []
     if room:
-        url += "?room=" + urllib.parse.quote(room)
+        params.append("room=" + urllib.parse.quote(room))
+    if peek:
+        params.append("peek=1")
+    url = base + "/v1/whats_new" + ("?" + "&".join(params) if params else "")
 
     # Fail-open is right for availability but makes every failure look identical to
     # "nothing new", so each exit path says which it was when debugging is on.
+    import json  # noqa: PLC0415
+    import urllib.error  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
     try:
         req = urllib.request.Request(url, headers={
             "Authorization": f"Bearer {token}",
@@ -217,31 +263,37 @@ def main() -> int:
                + (f" | body: {body}" if body else ""))
         # Record the attempt even on failure: an unreachable bus must not turn
         # every tool call in the turn into another retry.
-        try:
-            marker.touch()
-        except OSError:
-            pass
+        _mark(marker)
         return 0
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
         _debug(f"cannot reach {base} ({type(exc).__name__}: {exc}) — failing open")
         # Record the attempt even on failure: an unreachable bus must not turn
         # every tool call in the turn into another retry.
-        try:
-            marker.touch()
-        except OSError:
-            pass
+        _mark(marker)
         return 0
     except ValueError as exc:
         _debug(f"reply from {url} was not JSON ({exc}) — failing open")
         return 0
 
-    try:
-        marker.touch()
-    except OSError:
-        pass
+    _mark(marker)
 
     events = payload.get("events") or []
     onboarding = payload.get("room_onboarding") or {}
+    if peek:
+        # Peeking returns the whole unread backlog every time, and (because the cursor
+        # never moves) the onboarding block every time too. Filter both against what has
+        # already been shown, then record the new high-water mark.
+        seen_id, seen_ob = _seen(marker)
+        events = [e for e in events if int(e.get("id") or 0) > seen_id]
+        if onboarding and seen_ob:
+            onboarding = {}
+        if events or onboarding:
+            _mark(marker,
+                  max([int(e.get("id") or 0) for e in events], default=seen_id),
+                  onboarded=True if onboarding else None)
+        _debug(f"peek: {len(events)} new since id {seen_id}, "
+               f"onboarding={'yes' if onboarding else 'already shown' if seen_ob else 'none'} "
+               "(cursor untouched)")
     _debug(f"HTTP 200 from {url} — room={payload.get('room')!r} "
            f"agent={payload.get('agent')!r} events={len(events)} "
            f"onboarding={'yes' if onboarding else 'no'}")
@@ -289,8 +341,30 @@ def main() -> int:
     return 0
 
 
+def _selfcheck() -> int:
+    """Identify this file without needing the server.
+
+    The sha256 is the same value /v1/hook advertises in X-Chatroom-Hook-SHA256, so
+    someone holding an already-installed hook can tell whether it is the current one
+    even offline — which is what three agents asked for after a stale copy shipped.
+    """
+    try:
+        with open(__file__, "rb") as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        digest = "unreadable"
+    print(f"chatroom_whats_new.py {__version__}")
+    print(f"sha256 {digest}")
+    print(f"in-loop events: {', '.join(THROTTLED_EVENTS)}")
+    print(f"min interval:   {MIN_INTERVAL:.0f}s  (CHATROOM_HOOK_MIN_INTERVAL)")
+    print("in-loop reads with peek=1 (cursor untouched); prompt-time consumes.")
+    return 0
+
+
 if __name__ == "__main__":
     try:
+        if len(sys.argv) > 1 and sys.argv[1] in ("--version", "--selfcheck"):
+            sys.exit(_selfcheck())
         sys.exit(main())
     except Exception:
         sys.exit(0)

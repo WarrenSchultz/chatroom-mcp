@@ -971,6 +971,48 @@ def main() -> int:
               r4.stdout.lstrip().startswith("<chatroom_activity>"), r4.stdout[:80])
 
         # An unreachable bus during a long turn must not retry on every single tool call.
+        # In-loop delivery must not consume the cursor: an event spent while the agent is
+        # deep in unrelated work would otherwise never re-surface at a prompt.
+        t_peek = mint("peekbox", "projA")
+        box1.call("post_message", {"body": "peek probe one"})
+        cursor_of = lambda a: rc.get(f"{BASE}/v1/rooms", headers={"Authorization": f"Bearer {a}"}).status_code
+        p1 = hook_ev("PostToolUse", t_peek)
+        check("in-loop delivery reaches the agent", "peek probe one" in p1.stdout, p1.stdout[:120])
+        check("...via peek, leaving the cursor untouched",
+              "cursor untouched" in p1.stderr, p1.stderr[:200])
+        after_peek = Agent(t_peek).call("whats_new")
+        check("...so the prompt-time path still has it to deliver",
+              any("peek probe one" in (e.get("detail") or "") for e in after_peek["events"]),
+              str(after_peek)[:200])
+
+        # Peek returns the whole unread backlog each time, so without a local high-water
+        # mark every in-loop check would re-inject the same events.
+        t_dedup = mint("dedupbox", "projA")
+        box1.call("post_message", {"body": "dedup probe alpha"})
+        d_a = hook_ev("PostToolUse", t_dedup, {"CHATROOM_HOOK_MIN_INTERVAL": "0"})
+        d_b = hook_ev("PostToolUse", t_dedup, {"CHATROOM_HOOK_MIN_INTERVAL": "0"})
+        check("in-loop delivers new activity once", "dedup probe alpha" in d_a.stdout)
+        check("...and stays silent on the next due check rather than repeating",
+              d_b.stdout == "", d_b.stdout[:120])
+        box1.call("post_message", {"body": "dedup probe beta"})
+        d_c = hook_ev("PostToolUse", t_dedup, {"CHATROOM_HOOK_MIN_INTERVAL": "0"})
+        check("...and delivers only the genuinely new event",
+              "dedup probe beta" in d_c.stdout and "dedup probe alpha" not in d_c.stdout,
+              d_c.stdout[:200])
+
+        # The suppressed path runs on every tool call, so its import set is a real cost.
+        src = (ROOT / "hooks" / "chatroom_whats_new.py").read_text()
+        head = src.split("def _debug", 1)[0]
+        for heavy in ("import urllib.request", "import urllib.error", "import tempfile",
+                      "import pathlib", "import json"):
+            check(f"module scope avoids {heavy.split()[1]} (deferred off the hot path)",
+                  heavy not in head, heavy)
+        sc = subprocess.run([sys.executable, str(ROOT / "hooks" / "chatroom_whats_new.py"),
+                             "--selfcheck"], capture_output=True, text=True,
+                            stdin=subprocess.DEVNULL)
+        check("--selfcheck identifies the file offline, with the digest the header serves",
+              "sha256" in sc.stdout and "peek=1" in sc.stdout, sc.stdout[:160])
+
         t_down = mint("downbox", "projA")
         d1 = hook_ev("PostToolUse", t_down, {"CHATROOM_URL": "http://127.0.0.1:9"})
         check("an unreachable bus fails open on the in-loop path",
