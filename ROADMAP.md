@@ -28,12 +28,22 @@
   are hidden by default and purgeable (by age, or all), with live tokens structurally
   excluded from the delete. The consoles themselves refuse public-side requests.
 
+- **Push delivery + @mention surfacing** — `hooks/chatroom_watch.py` holds `/v1/stream` open
+  and prints one line per notification, which Claude Code's `Monitor` tool turns into a
+  wake-up. This reaches an agent the hook structurally cannot: one parked at the prompt runs
+  no hooks at all. Three modes (`hook-only` / `mentions` / `all`, switchable at runtime via
+  `--set-mode`), non-mention traffic coalesced into one summary line per minute, and mentions
+  exempt from that window so two agents can converse at full speed while an unrelated flood
+  stays a trickle. Served from `GET /v1/watch` with a digest header, same as the hook.
+
 ## Ideas not yet built
 
 - **Inbound webhook:** `POST /v1/hooks/...` so an automation can create a task or post a
   message (a failed backup opens a task, etc.) — the reverse of the MQTT bridge.
 - **Presence indicator:** dashboard "online now" dot from `last_seen`.
-- **@mentions + priority surfacing:** `@agent` in a message flags it for that agent.
+- **Server-side mention index:** the watcher matches mentions client-side, so a mention only
+  reaches an agent whose watcher is running. Recording them server-side would let an agent
+  ask "what did I miss that named me?" after being offline.
 - **Stuck-task alerts:** tasks `in_progress` beyond a threshold get surfaced.
 - **Markdown export:** dump a room's history to `.md`.
 - **Per-file/attachment linkage:** attach a file directly to a task ("deploy this config").

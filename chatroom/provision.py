@@ -178,6 +178,34 @@ def client_setup(
         "# Then restart the Claude Code session so it picks up the hook and env."
     )
 
+    # The push half. Optional and separate from the hook install on purpose: the hook
+    # alone is a complete, working setup, and this adds a long-lived process plus a
+    # per-notification model-turn cost that not every box should pay by default.
+    watch_install = (
+        "mkdir -p ~/.claude/hooks\n"
+        "tmp=$(mktemp) \\\n"
+        f"  && curl -fsSL -H {shlex.quote('Authorization: Bearer ' + token)} \\\n"
+        f"       {url}/v1/watch -o \"$tmp\" \\\n"
+        "  && python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' \"$tmp\" \\\n"
+        "  && mv \"$tmp\" ~/.claude/hooks/chatroom_watch.py \\\n"
+        "  && echo 'watcher downloaded OK' \\\n"
+        "  || { echo 'DOWNLOAD FAILED — watcher not installed'; rm -f \"$tmp\"; }\n"
+        "\n"
+        "# Verify it can reach the bus and identify itself before arming anything.\n"
+        f"CHATROOM_URL={shlex.quote(url)} \\\n"
+        f"  CHATROOM_TOKEN={shlex.quote(token)} \\\n"
+        f"  CHATROOM_ROOM={shlex.quote(room)} \\\n"
+        "  python3 ~/.claude/hooks/chatroom_watch.py --selfcheck"
+    )
+
+    # What the agent itself runs. Not a shell command: the Monitor tool is what turns
+    # each printed line into a wake-up, so a plain background shell would achieve nothing.
+    watch_arm = (
+        'Monitor(command="python3 ~/.claude/hooks/chatroom_watch.py",\n'
+        f'        description="chatroom {room}",\n'
+        '        persistent=true)'
+    )
+
     # Operator-to-agent text. Deliberately states the room and the untrusted-data
     # rule, because an agent reading peer chat needs both to behave correctly.
     agent_brief = (
@@ -209,6 +237,8 @@ def client_setup(
         "mcp_json": mcp_json,
         "hook_env": hook_env,
         "hook_install": hook_install,
+        "watch_install": watch_install,
+        "watch_arm": watch_arm,
         "agent_brief": agent_brief,
         "admin_cli_equivalent": _admin_cli(agent, room, readonly, admin, all_rooms, extra_rooms),
     }

@@ -925,12 +925,22 @@ async def rest_whats_new(request: Request) -> JSONResponse:
         conn.close()
 
 
-def _hook_digest() -> str:
-    """SHA-256 of the hook this server would hand out, or '' if it is not bundled."""
-    path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "hooks",
-                        "chatroom_whats_new.py")
+#: Client-side scripts this server hands out, by route suffix. Both are Apache 2.0 and
+#: public; serving them from here is about reachability, not secrecy.
+CLIENT_SCRIPTS = {
+    "hook": "chatroom_whats_new.py",     # pull: injects unread activity at hook points
+    "watch": "chatroom_watch.py",        # push: streams events as Monitor notifications
+}
+
+
+def _script_path(name: str) -> str:
+    return os.path.join(os.path.dirname(os.path.dirname(__file__)), "hooks", name)
+
+
+def _hook_digest(name: str = "chatroom_whats_new.py") -> str:
+    """SHA-256 of a client script this server would hand out, or '' if not bundled."""
     try:
-        with open(path, "rb") as fh:
+        with open(_script_path(name), "rb") as fh:
             return hashlib.sha256(fh.read()).hexdigest()
     except OSError:
         return ""
@@ -938,13 +948,22 @@ def _hook_digest() -> str:
 
 @mcp.custom_route("/v1/hook", methods=["GET"])
 async def rest_hook_source(request: Request):
-    """Serve the UserPromptSubmit hook so a new box can install it without a clone.
+    return _serve_client_script(request, "hook")
+
+
+@mcp.custom_route("/v1/watch", methods=["GET"])
+async def rest_watch_source(request: Request):
+    return _serve_client_script(request, "watch")
+
+
+def _serve_client_script(request: Request, which: str):
+    """Serve a client script so a new box can install it without a clone.
 
     A machine being provisioned usually has Claude Code and nothing else — telling it
     to `cp hooks/chatroom_whats_new.py` refers to a directory that is not there. It can
     always reach *this* server, though, since that is the point of the token it was just
     given, so serving the script from here needs no GitHub access, works on a LAN with no
-    internet and for private forks, and guarantees the hook matches the running server.
+    internet and for private forks, and guarantees the script matches the running server.
 
     Requires a bearer token (any role): not because the source is secret — it is Apache
     2.0 and public — but so the fetch carries an Authorization header and therefore
@@ -955,22 +974,21 @@ async def rest_hook_source(request: Request):
         return got
     conn, _ident = got
     conn.close()
-    path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "hooks",
-                        "chatroom_whats_new.py")
+    filename = CLIENT_SCRIPTS[which]
     try:
-        with open(path, encoding="utf-8") as fh:
+        with open(_script_path(filename), encoding="utf-8") as fh:
             body = fh.read()
     except OSError:
-        return JSONResponse({"error": "hook source not bundled with this server"},
+        return JSONResponse({"error": f"{filename} not bundled with this server"},
                             status_code=404)
     # Advertise the digest so a client can tell at a glance whether it is holding the
-    # same hook the server is. The server reads this file from its own image, so a
-    # container that was built but never recreated serves a stale hook while every other
+    # same script the server is. The server reads this file from its own image, so a
+    # container that was built but never recreated serves a stale copy while every other
     # check looks healthy — that happened, and it was caught by an agent reading the
     # bytes rather than by anything here.
     digest = hashlib.sha256(body.encode()).hexdigest()
     return PlainTextResponse(body, headers={
-        "Content-Disposition": 'attachment; filename="chatroom_whats_new.py"',
+        "Content-Disposition": f'attachment; filename="{filename}"',
         "X-Chatroom-Hook-SHA256": digest,
         "X-Chatroom-Hook-Bytes": str(len(body.encode())),
     })
@@ -1258,6 +1276,7 @@ async def admin_state(request: Request) -> JSONResponse:
             "public_url": provision.public_url(),
             "server": {
                 "hook_sha256": _hook_digest(),
+                "watch_sha256": _hook_digest("chatroom_watch.py"),
                 "trust_proxy": security.trust_proxy(),
                 "ui_enabled": security.ui_enabled(),
                 "auth_fail_limit": _throttle.limit,
@@ -1443,7 +1462,10 @@ async def _event_stream(room: str, after: int, after_msg: int):
     last = after
     last_msg = after_msg
     idle = 0.0
-    yield f": connected to room {room}\n\n".encode()
+    # The greeting carries the resolved marks so a client that asked for "now" learns
+    # where "now" was, and can resume from there after a reconnect instead of either
+    # replaying history or silently skipping whatever happened while it was away.
+    yield f": connected to room {room} after={last} after_msg={last_msg}\n\n".encode()
     while True:
         c = db.connect()
         try:
@@ -1500,12 +1522,25 @@ async def rest_stream(request: Request):
         if after_raw == "all":
             after = 0
             after_msg = 0
+        elif after_raw == "now":
+            # A watcher arming for the first time wants what happens NEXT. Replaying
+            # history as notifications would wake an agent once per past event — the
+            # exact failure the whole design is trying to avoid.
+            after = db.max_event_id(conn, rm)
+            after_msg = db.max_message_id(conn, rm)
         elif after_raw is not None and after_raw.lstrip("-").isdigit():
             after = int(after_raw)
             after_msg = max(0, db.max_message_id(conn, rm) - 25)
         else:
             after = max(0, db.max_event_id(conn, rm) - 25)   # a little history for context
             after_msg = max(0, db.max_message_id(conn, rm) - 25)
+        # The dashboard wants that backfill; a reconnecting watcher does not, because
+        # replayed messages are indistinguishable from new ones at the notification
+        # layer. Let a caller resume exactly where it left off. (Clients must still
+        # dedup by id: an older server ignores this and backfills anyway.)
+        msg_raw = request.query_params.get("after_msg")
+        if msg_raw is not None and msg_raw.lstrip("-").isdigit():
+            after_msg = max(0, int(msg_raw))
     except db.RoomError as exc:
         return JSONResponse({"error": str(exc)}, status_code=403)
     finally:

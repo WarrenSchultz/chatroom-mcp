@@ -1054,6 +1054,192 @@ def main() -> int:
               r6.returncode == 0 and not r6.stdout.lstrip().startswith("{"),
               r6.stdout[:80])
 
+        # --- watcher: push delivery via SSE -------------------------------------
+        print("\n--- watcher: push delivery, modes, coalescing ---")
+        WATCH = str(ROOT / "hooks" / "chatroom_watch.py")
+
+        def watch_env(token, extra=None):
+            e = {k: v for k, v in os.environ.items()
+                 if not k.startswith("CHATROOM_WATCH_") and k != "CHATROOM_ROOM"}
+            e.update({"CHATROOM_URL": BASE, "CHATROOM_TOKEN": token,
+                      "CHATROOM_ROOM": "projA", "CHATROOM_WATCH_DEBUG": "1"})
+            e.update(extra or {})
+            return e
+
+        def run_watcher(token, extra=None, seconds=6.0, posts=()):
+            """Start the watcher, post as a peer while it runs, return (stdout, stderr).
+
+            Terminating rather than waiting is the point: this process is designed never
+            to exit on its own, so the test asserts on what it printed while alive.
+            """
+            p = subprocess.Popen([sys.executable, WATCH], stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True,
+                                 env=watch_env(token, extra))
+            try:
+                _t.sleep(2.0)                     # let it connect and drain backfill
+                for body in posts:
+                    box1.call("post_message", {"body": body})
+                    _t.sleep(0.6)
+                _t.sleep(seconds)
+            finally:
+                p.terminate()
+                try:
+                    out, err = p.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    out, err = p.communicate()
+            return out, err
+
+        t_watch = mint("watchbox", "projA")
+
+        # Identity has to come from the credential, same as everywhere else: the watcher
+        # cannot know its own name (and so cannot detect a mention) without asking.
+        sc = subprocess.run([sys.executable, WATCH, "--selfcheck"],
+                            capture_output=True, text=True, env=watch_env(t_watch))
+        check("watcher --selfcheck reports version and its own digest",
+              "chatroom_watch.py" in sc.stdout and re.search(r"sha256:\s+[0-9a-f]{64}", sc.stdout),
+              sc.stdout[:160])
+
+        # mentions is the default, so unrelated chatter must produce nothing at all.
+        out, err = run_watcher(t_watch, posts=["watcher noise, nobody named here"])
+        check("watcher identifies itself from the token", "as watchbox" in err, err[:160])
+        check("default mode is mentions", "mode=mentions" in err, err[:160])
+        check("...so unrelated chat produces no notification", out.strip() == "",
+              repr(out[:160]))
+
+        # A mention must arrive, and must arrive WITHOUT waiting out the 60s window —
+        # that is the property that lets two agents actually converse.
+        t0 = _t.time()
+        out, err = run_watcher(t_watch, posts=["hey watchbox can you confirm this"],
+                               seconds=4.0)
+        check("a mention notifies", "@you" in out and "watchbox" in out, repr(out[:200]))
+        check("...bypassing the 60s coalescing window",
+              out.strip() != "" and _t.time() - t0 < 30, f"{_t.time() - t0:.0f}s")
+        check("...as exactly one line", len([l for l in out.splitlines() if l.strip()]) == 1,
+              repr(out[:200]))
+
+        # Coalescing, with the window shortened so the behaviour is observable. The
+        # budget starts full on purpose: the first thing that happens after you arm gets
+        # through promptly, and only the follow-ups are batched.
+        # Runs past a server keepalive (15s) on purpose: keepalives are what wake an idle
+        # reader, so they set how promptly a pending batch can flush.
+        out, werr = run_watcher(t_watch, {"CHATROOM_WATCH_MODE": "all",
+                                          "CHATROOM_WATCH_MIN_INTERVAL": "5"},
+                                posts=["broadcast one", "broadcast two", "broadcast three"],
+                                seconds=20.0)
+        lines = [l for l in out.splitlines() if l.strip()]
+
+        # Regression: a socket timeout used to be treated as a tick, but http.client
+        # poisons the connection once one fires, so every tick silently redialled TLS.
+        # Short runs hid it completely — only an idle run longer than the timeout shows it.
+        check("an idle watcher holds ONE connection instead of redialling",
+              werr.count("connected:") == 1, f"{werr.count('connected:')} connects")
+        check("...and does not log read timeouts while the server is healthy",
+              "reconnecting" not in werr, werr[-200:])
+        check("mode=all lets the first event through immediately",
+              bool(lines) and "broadcast one" in lines[0] and "1 new" in lines[0],
+              repr(out[:250]))
+        check("...then coalesces the rest into ONE summary line",
+              len(lines) == 2 and "broadcast two" in lines[1] and "broadcast three" in lines[1],
+              f"{len(lines)} lines: " + repr(out[:250]))
+        check("...which says how many it merged", len(lines) == 2 and "2 new" in lines[1],
+              repr(out[:250]))
+        check("a chat message notifies once, not once per underlying event",
+              out.count("broadcast two") == 1, repr(out[:250]))
+
+        out, _ = run_watcher(t_watch, {"CHATROOM_WATCH_MODE": "all",
+                                       "CHATROOM_WATCH_MIN_INTERVAL": "0"},
+                             posts=["immediate one", "immediate two"], seconds=3.0)
+        check("a zero window emits each event as its own notification",
+              len([l for l in out.splitlines() if l.strip()]) == 2, repr(out[:250]))
+
+        # hook-only at launch must not hold a connection open for nothing.
+        honly = subprocess.run([sys.executable, WATCH, "--mode", "hook-only"],
+                            capture_output=True, text=True, timeout=20,
+                            env=watch_env(t_watch))
+        check("mode=hook-only exits instead of arming",
+              honly.returncode == 0 and honly.stdout == "" and "nothing to watch" in honly.stderr,
+              (honly.stdout + honly.stderr)[:160])
+
+        # Runtime switching: --set-mode has to retarget a watcher that is already running,
+        # or the mode is only settable by restarting, which an agent cannot do to itself.
+        # Its own token, so the mode file it writes cannot colour any other assertion —
+        # the state path is keyed on (server, credential, room) precisely so it is scoped.
+        t_setmode = mint("setmodebox", "projA")
+        state_probe = subprocess.run([sys.executable, WATCH, "--set-mode", "all"],
+                                     capture_output=True, text=True, env=watch_env(t_setmode))
+        check("--set-mode writes the mode and exits",
+              state_probe.returncode == 0 and "mode set to all" in state_probe.stderr,
+              (state_probe.stdout + state_probe.stderr)[:160])
+        out, err = run_watcher(t_setmode, posts=["set-mode took effect"], seconds=4.0)
+        check("...and a watcher launched afterwards honours the file over its default",
+              "set-mode took effect" in out, repr(out[:200]) + " | " + err[:120])
+
+        # An agent must never be woken for its own work — the single most common way a
+        # notification loop turns into a feedback loop.
+        self_env = watch_env(t_watch, {"CHATROOM_WATCH_MODE": "all"})
+        p = subprocess.Popen([sys.executable, WATCH], stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, env=self_env)
+        try:
+            _t.sleep(2.0)
+            Agent(t_watch).call("post_message", {"body": "watchbox talking to itself"})
+            _t.sleep(4.0)
+        finally:
+            p.terminate()
+            self_out, _ = p.communicate(timeout=10)
+        check("an agent is never notified about its own message",
+              "talking to itself" not in self_out, repr(self_out[:200]))
+
+        # A bad credential must say so and stop. Failing open here would be silent:
+        # the watcher would retry forever and the room would just look quiet.
+        bad = subprocess.run([sys.executable, WATCH], capture_output=True, text=True,
+                             timeout=25, env=watch_env("cr_watch_bogus"))
+        check("a rejected token stops the watcher instead of retrying silently",
+              bad.returncode != 0 and "cannot identify" in (bad.stdout + bad.stderr).lower(),
+              (bad.stdout + bad.stderr)[:160])
+        check("...and says the token was rejected, not that the bus was unreachable",
+              "401" in bad.stderr and "not recognised" in bad.stderr, bad.stderr[:160])
+
+        # Cold start must not replay: an armed watcher reports what happens next.
+        box1.call("post_message", {"body": "posted BEFORE the watcher arms"})
+        out, _ = run_watcher(t_watch, {"CHATROOM_WATCH_MODE": "all"},
+                             posts=["posted AFTER the watcher arms"], seconds=4.0)
+        check("a cold start does not replay history as notifications",
+              "BEFORE the watcher arms" not in out, repr(out[:250]))
+        check("...but does deliver what happens next", "AFTER the watcher arms" in out,
+              repr(out[:250]))
+
+        # after_msg is what stops a reconnect from replaying history as "new".
+        hw = rc.get(f"{BASE}/v1/messages?room=projA",
+                    headers={"Authorization": f"Bearer {t_watch}"}).json()
+        top = max((m["id"] for m in hw.get("messages", [])), default=0)
+        with rc.stream("GET", f"{BASE}/v1/stream?room=projA&after=999999&after_msg={top}",
+                       headers={"Authorization": f"Bearer {t_watch}"},
+                       timeout=6) as sresp:
+            got = ""
+            try:
+                for chunk in sresp.iter_text():
+                    got += chunk
+                    if len(got) > 400:
+                        break
+            except Exception:                     # noqa: BLE001 - read timeout ends the peek
+                pass
+        check("/v1/stream honours after_msg (no replay on reconnect)",
+              "event: chat" not in got, repr(got[:200]))
+
+        # The server must hand out the watcher the same way it hands out the hook, or a
+        # remote box has no way to get it without a clone.
+        wsrc = rc.get(f"{BASE}/v1/watch", headers={"Authorization": f"Bearer {t_watch}"})
+        disk = (ROOT / "hooks" / "chatroom_watch.py").read_bytes()
+        check("/v1/watch serves the watcher source",
+              wsrc.status_code == 200 and "chatroom_watch" in wsrc.text, str(wsrc.status_code))
+        check("...with a digest header matching the bytes on disk",
+              wsrc.headers.get("X-Chatroom-Hook-SHA256") ==
+              __import__("hashlib").sha256(disk).hexdigest(),
+              str(wsrc.headers.get("X-Chatroom-Hook-SHA256")))
+        check("/v1/watch requires a token",
+              rc.get(f"{BASE}/v1/watch").status_code == 401)
+
         print("\n--- exposure hardening (tunnel / public reachability) ---")
         from chatroom import security
 

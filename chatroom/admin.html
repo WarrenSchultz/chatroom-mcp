@@ -265,7 +265,11 @@ function paneFor(s,agent){
   return snip("register with Claude Code (run on "+agent+")",s.claude_cli)
        + snip("or .mcp.json",s.mcp_json)
        + snip("hook environment",s.hook_env)
-       + snip("hook install",s.hook_install)
+       + snip("hook install (pull — delivers at hook points)",s.hook_install)
+       // Optional, and listed after the hook because the hook alone is a complete setup.
+       // This one adds a long-lived process and a model turn per notification.
+       + snip("watcher install (push — optional, wakes an idle agent)",s.watch_install)
+       + snip("...then the agent arms it once per session",s.watch_arm)
        + snip("paste this to the agent",s.agent_brief);
 }
 
