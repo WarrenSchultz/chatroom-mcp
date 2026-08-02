@@ -822,6 +822,17 @@ def main() -> int:
                   and "chatroom_activity" in hooksrc.text, str(hooksrc.status_code))
             check("/v1/hook matches the bundled hook byte for byte",
                   hooksrc.text == (ROOT / "hooks" / "chatroom_whats_new.py").read_text())
+            # A server whose container was built but never recreated serves a stale hook
+            # while every other health check looks fine. Publishing the digest makes that
+            # detectable with one HEAD request instead of by reading the file.
+            import hashlib as _h
+            check("/v1/hook advertises its digest so staleness is detectable",
+                  hooksrc.headers.get("X-Chatroom-Hook-SHA256")
+                  == _h.sha256(hooksrc.content).hexdigest(),
+                  str(hooksrc.headers.get("X-Chatroom-Hook-SHA256")))
+            check("admin state reports the same digest",
+                  rc.get(f"{abase}/v1/admin/state", headers=sah).json()["server"]["hook_sha256"]
+                  == _h.sha256(hooksrc.content).hexdigest())
             check("/v1/hook still requires a credential",
                   rc.get(f"{abase}/v1/hook").status_code == 401)
             check("/v1/hook is NOT console-gated — remote boxes must be able to fetch it",

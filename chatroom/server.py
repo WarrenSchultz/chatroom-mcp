@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import sqlite3
@@ -924,6 +925,17 @@ async def rest_whats_new(request: Request) -> JSONResponse:
         conn.close()
 
 
+def _hook_digest() -> str:
+    """SHA-256 of the hook this server would hand out, or '' if it is not bundled."""
+    path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "hooks",
+                        "chatroom_whats_new.py")
+    try:
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return ""
+
+
 @mcp.custom_route("/v1/hook", methods=["GET"])
 async def rest_hook_source(request: Request):
     """Serve the UserPromptSubmit hook so a new box can install it without a clone.
@@ -951,8 +963,17 @@ async def rest_hook_source(request: Request):
     except OSError:
         return JSONResponse({"error": "hook source not bundled with this server"},
                             status_code=404)
+    # Advertise the digest so a client can tell at a glance whether it is holding the
+    # same hook the server is. The server reads this file from its own image, so a
+    # container that was built but never recreated serves a stale hook while every other
+    # check looks healthy — that happened, and it was caught by an agent reading the
+    # bytes rather than by anything here.
+    digest = hashlib.sha256(body.encode()).hexdigest()
     return PlainTextResponse(body, headers={
-        "Content-Disposition": 'attachment; filename="chatroom_whats_new.py"'})
+        "Content-Disposition": 'attachment; filename="chatroom_whats_new.py"',
+        "X-Chatroom-Hook-SHA256": digest,
+        "X-Chatroom-Hook-Bytes": str(len(body.encode())),
+    })
 
 
 @mcp.custom_route("/v1/tasks", methods=["GET"])
@@ -1236,6 +1257,7 @@ async def admin_state(request: Request) -> JSONResponse:
             "lan_url": provision.lan_url(request.headers, request.url.scheme),
             "public_url": provision.public_url(),
             "server": {
+                "hook_sha256": _hook_digest(),
                 "trust_proxy": security.trust_proxy(),
                 "ui_enabled": security.ui_enabled(),
                 "auth_fail_limit": _throttle.limit,
