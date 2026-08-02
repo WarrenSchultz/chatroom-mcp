@@ -148,7 +148,7 @@ docker compose exec chatroom python -m chatroom.admin list-rooms
 docker compose exec chatroom python -m chatroom.admin list-tokens
 docker compose exec chatroom python -m chatroom.admin revoke --agent <agent>
 docker compose exec chatroom python -m chatroom.admin purge-tokens --older-than-days 90 --yes
-docker compose run --rm chatroom python tests/test_e2e.py     # full self-test (187 assertions)
+docker compose run --rm chatroom python tests/test_e2e.py     # full self-test (201 assertions)
 ```
 Back up the DB safely while running:
 

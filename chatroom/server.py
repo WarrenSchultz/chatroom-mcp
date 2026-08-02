@@ -579,13 +579,17 @@ def read_events(
 @mcp.tool(
     description="Share a small file (source/config) with your room. `content_base64` is the "
                 "file's bytes, base64-encoded. Size cap ~1 MB (server-configurable). For code and "
-                "config, not media. Peers see it via whats_new and fetch with get_file."
+                "config, not media. Peers see it via whats_new and fetch with get_file. "
+                "Set `expires_in_hours` for scratch artefacts (a probe output, a one-off dump) "
+                "so they clean themselves up; omit it and the file lives until the room's "
+                "retention policy removes it. You can always delete_file it yourself."
 )
 def put_file(
     ctx: Context,
     name: str,
     content_base64: str,
     mime: str = "application/octet-stream",
+    expires_in_hours: float | None = None,
     room: str | None = None,
 ) -> dict[str, Any]:
     conn, ident = _auth(ctx)
@@ -605,12 +609,15 @@ def put_file(
                 f"file is {len(content)} bytes; the cap is {MAX_FILE_BYTES}. "
                 "Share large files out of band and reference them instead."
             )
+        expires_at = db.expiry_from_hours(expires_in_hours)
         fid, sha, sz = db.put_file(
-            conn, rm, name.strip(), content, (mime or "application/octet-stream").strip(), ident.agent
+            conn, rm, name.strip(), content, (mime or "application/octet-stream").strip(),
+            ident.agent, expires_at,
         )
-        db.log_event(conn, rm, "file_added", ident.agent, None, f"{name.strip()} ({sz} B)")
+        detail = f"{name.strip()} ({sz} B)" + (f" expires {expires_at}" if expires_at else "")
+        db.log_event(conn, rm, "file_added", ident.agent, None, detail)
         return {"ok": True, "file_id": fid, "name": name.strip(), "sha256": sha,
-                "size": sz, "room": rm}
+                "size": sz, "room": rm, "expires_at": expires_at}
     finally:
         conn.close()
 
@@ -649,6 +656,36 @@ def list_files(ctx: Context, room: str | None = None, limit: int = 100) -> dict[
             "download_path_template": "/v1/files/{id}",
             "_note": UNTRUSTED,
         }
+    finally:
+        conn.close()
+
+
+@mcp.tool(
+    description="Delete a file from your room. You may delete a file you uploaded; an admin "
+                "token may delete any file in a room it is granted. Deletion is immediate "
+                "and permanent — the bytes are gone, not archived."
+)
+def delete_file(ctx: Context, file_id: int, room: str | None = None) -> dict[str, Any]:
+    conn, ident = _auth(ctx)
+    try:
+        _require_write(ident)
+        rm = _room(ident, room)
+        row = conn.execute("SELECT author FROM files WHERE id=? AND room=?",
+                           (int(file_id), rm)).fetchone()
+        if row is None:
+            raise ValueError(f"file {file_id} not found in room {rm!r}")
+        # Author-or-admin: an agent tidying up after itself is routine, while reaching
+        # across to delete a peer's evidence should require the admin role.
+        if row["author"] != ident.agent and not ident.admin:
+            raise ValueError(
+                f"file {file_id} was uploaded by {row['author']!r}; only its author or an "
+                "admin token can delete it"
+            )
+        meta = db.delete_file(conn, int(file_id), rm)
+        assert meta is not None
+        db.log_event(conn, rm, "file_deleted", ident.agent, None,
+                     f"{meta['name']} ({meta['size']} B)")
+        return {"ok": True, "deleted": db.file_meta_dict(meta), "room": rm}
     finally:
         conn.close()
 
@@ -998,6 +1035,39 @@ async def rest_file_download(request: Request):
             media_type=row["mime"] or "application/octet-stream",
             headers={"Content-Disposition": f'attachment; filename="{safe}"'},
         )
+    finally:
+        conn.close()
+
+
+@mcp.custom_route("/v1/files/{file_id}", methods=["DELETE"])
+async def rest_file_delete(request: Request) -> JSONResponse:
+    """Delete a file. Used by the dashboard's Files panel with an admin token."""
+    got = _rest_auth(request)
+    if isinstance(got, JSONResponse):
+        return got
+    conn, ident = got
+    try:
+        if ident.readonly:
+            return JSONResponse({"error": "read-only token cannot delete files"},
+                                status_code=403)
+        try:
+            fid = int(request.path_params["file_id"])
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "bad file id"}, status_code=400)
+        row = conn.execute("SELECT room, author FROM files WHERE id=?", (fid,)).fetchone()
+        if row is None:
+            return JSONResponse({"error": f"file {fid} not found"}, status_code=404)
+        rm = row["room"]
+        if not (ident.all_rooms or rm in ident.allowed_rooms):
+            return JSONResponse({"error": f"token does not grant room {rm!r}"}, status_code=403)
+        if row["author"] != ident.agent and not ident.admin:
+            return JSONResponse(
+                {"error": f"file {fid} belongs to {row['author']!r}; needs its author or "
+                          "an admin token"}, status_code=403)
+        meta = db.delete_file(conn, fid, rm)
+        db.log_event(conn, rm, "file_deleted", ident.agent, None,
+                     f"{meta['name']} ({meta['size']} B)")
+        return JSONResponse({"ok": True, "deleted": db.file_meta_dict(meta), "room": rm})
     finally:
         conn.close()
 

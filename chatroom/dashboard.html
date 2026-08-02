@@ -46,6 +46,8 @@
  .ev .k{flex:0 0 108px;color:var(--warn)}
  .ev .d{color:var(--dim);flex:1;word-break:break-word}
  .muted{color:var(--dim)}
+ .exp{color:var(--warn)}
+ .f button.del{background:transparent;color:var(--bad);border:1px solid #3a2429}
  /* Newest at the top in both live panels: this is a debug view, so the thing that
     just happened should be where your eye already is, with no scrolling to keep up. */
  #log,#chat{display:flex;flex-direction:column-reverse}
@@ -101,7 +103,7 @@
 <div class="modal" id="modal">
   <div class="card">
     <h3>Admin &mdash; room <span id="mroom" class="muted"></span></h3>
-    <div class="muted">Destructive/config actions need an <b>admin</b> token (separate from your observer token).</div>
+    <div class="muted">Destructive/config actions need an <b>admin</b> token (separate from your observer token). Deleting a file from the Files panel uses this token too.</div>
     <label>admin token</label>
     <input id="atok" type="password" placeholder="cr_… (admin)" style="width:100%">
 
@@ -184,11 +186,33 @@ function board(ts){
 }
 function files(fs){
   $("#fcnt").textContent="("+fs.length+")";
-  $("#files").innerHTML = fs.length ? fs.map(f=>
-    `<div class="f"><span class="fn">${esc(f.name)}</span><span class="fs">${kb(f.size)} · ${esc(f.author)}</span>`+
-    `<button data-fid="${f.id}" data-fn="${esc(f.name)}">get</button></div>`).join("")
-    : '<div class="muted">none</div>';
-  document.querySelectorAll("#files button").forEach(b=>b.onclick=()=>getFile(b.dataset.fid,b.dataset.fn));
+  $("#files").innerHTML = fs.length ? fs.map(f=>{
+    // expires_at is surfaced so a scratch artefact is visibly temporary rather than
+    // looking like something that will still be here tomorrow.
+    const exp = f.expires_at
+      ? ` · <span class="exp" title="expires ${esc(f.expires_at)}">expires ${esc(stamp(f.expires_at))}</span>`
+      : "";
+    return `<div class="f"><span class="fn">${esc(f.name)}</span>`+
+      `<span class="fs">${kb(f.size)} · ${esc(f.author)}${exp}</span>`+
+      `<button data-fid="${f.id}" data-fn="${esc(f.name)}">get</button>`+
+      `<button class="del" data-del="${f.id}" data-dn="${esc(f.name)}" title="delete (needs an admin token in the gear menu)">del</button></div>`;
+  }).join("") : '<div class="muted">none</div>';
+  document.querySelectorAll("#files button[data-fid]").forEach(b=>b.onclick=()=>getFile(b.dataset.fid,b.dataset.fn));
+  document.querySelectorAll("#files button[data-del]").forEach(b=>b.onclick=()=>delFile(b.dataset.del,b.dataset.dn));
+}
+
+async function delFile(id,name){
+  // Reuses the gear menu's admin token: an observer token is read-only by design and
+  // cannot delete, so the destructive action needs the same credential as the other ones.
+  const t=adminTok(); if(!t) return;
+  if(!confirm(`Permanently delete "${name}"? The bytes are removed, not archived.`)) return;
+  try{
+    const r=await fetch("/v1/files/"+encodeURIComponent(id),
+      {method:"DELETE",headers:{Authorization:"Bearer "+t}});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(d.error||("HTTP "+r.status));
+    $("#msg").textContent="deleted "+name;
+  }catch(e){ alert("delete failed: "+e.message); }
 }
 async function getFile(id,name){
   const r=await fetch("/v1/files/"+id,{headers:auth()});

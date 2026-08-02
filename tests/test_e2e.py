@@ -402,6 +402,50 @@ def main() -> int:
               rc.get(f"{BASE}/v1/files/{fid}",
                      headers={"Authorization": f"Bearer {t_box3}"}).status_code == 403)
 
+        print("\n--- file expiry & deletion ---")
+        blob = base64.b64encode(b"scratch").decode()
+        perm = box1.call("put_file", {"name": "keep.txt", "content_base64": blob})
+        check("a file with no expiry reports expires_at=None", perm["expires_at"] is None,
+              str(perm)[:120])
+        # 1.8s, so the assertion below is not racing a 1s boundary.
+        tmp = box1.call("put_file", {"name": "scratch.txt", "content_base64": blob,
+                                     "expires_in_hours": 0.0005})
+        check("an expiring file reports its absolute expiry",
+              bool(tmp["expires_at"]), str(tmp)[:120])
+        names = [f["name"] for f in box1.call("list_files")["files"]]
+        check("it is listed while still valid", "scratch.txt" in names, str(names))
+        time.sleep(2.5)
+        names = [f["name"] for f in box1.call("list_files")["files"]]
+        # The sweep runs hourly; reads must not serve an expired file in the meantime.
+        check("an expired file disappears from list_files before any sweep runs",
+              "scratch.txt" not in names, str(names))
+        check("...and cannot be fetched either",
+              "_tool_error" in box1.call("get_file", {"file_id": tmp["file_id"]}))
+        check("a non-expiring file is unaffected", "keep.txt" in names, str(names))
+
+        check("a peer cannot delete a file it did not upload",
+              "_tool_error" in box2.call("delete_file", {"file_id": perm["file_id"]}))
+        check("a read-only observer cannot delete",
+              "_tool_error" in obs.call("delete_file", {"file_id": perm["file_id"]}))
+        adm = Agent(mint("fileadmin", "projA", admin=True))
+        gone = adm.call("delete_file", {"file_id": perm["file_id"]})
+        check("an admin can delete another agent's file",
+              gone.get("ok") and gone["deleted"]["name"] == "keep.txt", str(gone)[:140])
+        check("the file is really gone",
+              "_tool_error" in box1.call("get_file", {"file_id": perm["file_id"]}))
+        own = box1.call("put_file", {"name": "mine.txt", "content_base64": blob})
+        check("an author can delete their own file",
+              box1.call("delete_file", {"file_id": own["file_id"]}).get("ok") is True)
+        check("deletion is recorded as an event, so the audit trail keeps the fact",
+              any(e["kind"] == "file_deleted"
+                  for e in box1.call("read_events", {"kind": "file_deleted"})["events"]))
+        check("deleting a missing file is an error, not a silent success",
+              "_tool_error" in box1.call("delete_file", {"file_id": 999999}))
+        rest_del = rc.delete(f"{BASE}/v1/files/1",
+                             headers={"Authorization": f"Bearer {t_obs}"})
+        check("REST delete refuses a read-only token", rest_del.status_code == 403,
+              str(rest_del.status_code))
+
         print("\n--- room info & onboarding ---")
         si = box1.call("set_room_info", {"description": "proj A ops", "repo_url": "https://x/a",
                                          "onboarding_notes": "read the README first"})

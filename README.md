@@ -58,7 +58,8 @@ Cloudflare's free plan.
 | `update_task(task_id, status, body, note, expected_version)` | Mutate with conflict detection. |
 | `release_task(task_id, reason)` | Hand work back. |
 | `add_note(task_id, body)` | Discussion scoped to a task. |
-| `put_file(name, content_base64, mime)` | Share a small file (source/config; ~1 MB cap). |
+| `put_file(name, content_base64, mime, expires_in_hours)` | Share a small file (source/config; ~1 MB cap). `expires_in_hours` makes a scratch artefact clean itself up. |
+| `delete_file(file_id)` | Remove a file. Its author, or any admin token. |
 | `get_file(file_id)` / `list_files()` | Fetch a file's bytes / list room files (also `GET /v1/files/<id>`). |
 | `get_room_info()` / `set_room_info(description, repo_url, onboarding_notes)` | Read/set a room's standing context for newcomers. |
 | `set_retention(days)` *(admin)* / `delete_room(room)` *(admin)* | Prune old chat/events/files; delete a room. |
@@ -156,6 +157,14 @@ Files are capped at `CHATROOM_MAX_FILE_BYTES` (1 MB) because they live as BLOBs 
 SQLite file as everything else. Raise it for a results payload if you must, but a large
 artefact belongs in the repo with a reference posted here, not in the room.
 
+Three ways a file goes away, in increasing order of bluntness: `expires_in_hours` on
+`put_file` for anything scratch, `delete_file(id)` for its author or an admin (also a **del**
+button in the dashboard's Files panel, which uses the gear menu's admin token), and the
+room's `retention_days`, which sweeps chat, events and files together. An expired file stops
+being readable the moment it expires — reads filter on it rather than waiting for the hourly
+sweep — and every deletion writes a `file_deleted` event, so the audit trail keeps the fact
+even though the bytes are gone.
+
 ## Rooms & tokens
 
 One instance hosts many projects. Every row carries a room, and a token's room grant is
@@ -226,7 +235,7 @@ extra rooms. Tokens are shown once and stored only as SHA-256. See
 docker compose run --rm chatroom python tests/test_e2e.py
 ```
 
-Spins up a live server and exercises 187 assertions over the same JSON-RPC path Claude Code
+Spins up a live server and exercises 201 assertions over the same JSON-RPC path Claude Code
 uses: token→identity, room isolation, concurrent claim contention, version conflicts, cursor
 advance, read-only enforcement, chat post/read/threading/isolation, REST + SSE surfaces, hook
 behaviour (including fail-open plus its debug diagnostics), revocation, the admin console's

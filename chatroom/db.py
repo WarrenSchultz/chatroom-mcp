@@ -199,6 +199,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tokens ADD COLUMN admin INTEGER NOT NULL DEFAULT 0")
     if "all_rooms" not in tcols:
         conn.execute("ALTER TABLE tokens ADD COLUMN all_rooms INTEGER NOT NULL DEFAULT 0")
+    fcols = {r["name"] for r in conn.execute("PRAGMA table_info(files)")}
+    if "expires_at" not in fcols:
+        # Per-file lifetime. Room retention already sweeps files by age, but that is one
+        # policy for the whole room; a scratch artefact often wants to die in an hour
+        # while the room keeps months of chat. NULL means "keep until room retention".
+        conn.execute("ALTER TABLE files ADD COLUMN expires_at TEXT")
     ecols = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
     if "message_id" not in ecols:
         # Events and messages have separate AUTOINCREMENT sequences, so "msg 19" read off
@@ -560,33 +566,70 @@ def message_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 # For sharing source/config between agents, not media.
 
 def put_file(conn: sqlite3.Connection, room: str, name: str, content: bytes,
-             mime: str, author: str) -> tuple[int, str, int]:
+             mime: str, author: str, expires_at: str | None = None) -> tuple[int, str, int]:
     sha = hashlib.sha256(content).hexdigest()
     cur = conn.execute(
-        "INSERT INTO files(room, name, sha256, size, mime, author, ts, content) "
-        "VALUES (?,?,?,?,?,?,?,?)",
-        (room, name, sha, len(content), mime, author, now(), sqlite3.Binary(content)),
+        "INSERT INTO files(room, name, sha256, size, mime, author, ts, content, expires_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (room, name, sha, len(content), mime, author, now(),
+         sqlite3.Binary(content), expires_at),
     )
     return int(cur.lastrowid or 0), sha, len(content)
 
 
+def expiry_from_hours(hours: float | None) -> str | None:
+    """Absolute UTC expiry from a relative lifetime. None/0 means it never expires."""
+    if not hours or float(hours) <= 0:
+        return None
+    return (dt.datetime.now(dt.timezone.utc)
+            + dt.timedelta(hours=float(hours))).isoformat(timespec="seconds")
+
+
+#: Files past expires_at are filtered from reads immediately, not just when the
+#: background sweep next runs — an expired file should never be servable, and the
+#: sweep interval (default an hour) is far too coarse to rely on for that.
+_UNEXPIRED = "(expires_at IS NULL OR expires_at > ?)"
+
+
+def delete_file(conn: sqlite3.Connection, file_id: int, room: str) -> sqlite3.Row | None:
+    """Delete one file, returning its metadata row if it existed. Room-scoped."""
+    row = conn.execute("SELECT id, room, name, sha256, size, mime, author, ts, expires_at "
+                       "FROM files WHERE id=? AND room=?", (file_id, room)).fetchone()
+    if row is None:
+        return None
+    conn.execute("DELETE FROM files WHERE id=? AND room=?", (file_id, room))
+    return row
+
+
+def purge_expired_files(conn: sqlite3.Connection) -> int:
+    """Remove files past their own expires_at, across every room."""
+    cur = conn.execute("DELETE FROM files WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                       (now(),))
+    return cur.rowcount or 0
+
+
 def get_file(conn: sqlite3.Connection, file_id: int, room: str) -> sqlite3.Row | None:
-    return conn.execute("SELECT * FROM files WHERE id=? AND room=?", (file_id, room)).fetchone()
+    return conn.execute(
+        f"SELECT * FROM files WHERE id=? AND room=? AND {_UNEXPIRED}",
+        (file_id, room, now()),
+    ).fetchone()
 
 
 def list_files(conn: sqlite3.Connection, room: str, limit: int = 100) -> list[sqlite3.Row]:
     return conn.execute(
-        "SELECT id, room, name, sha256, size, mime, author, ts FROM files "
-        "WHERE room=? ORDER BY id DESC LIMIT ?",
-        (room, max(1, min(int(limit), 500))),
+        f"SELECT id, room, name, sha256, size, mime, author, ts, expires_at FROM files "
+        f"WHERE room=? AND {_UNEXPIRED} ORDER BY id DESC LIMIT ?",
+        (room, now(), max(1, min(int(limit), 500))),
     ).fetchall()
 
 
 def file_meta_dict(row: sqlite3.Row) -> dict[str, Any]:
+    keys = row.keys()
     return {
         "id": int(row["id"]), "name": row["name"], "sha256": row["sha256"],
         "size": int(row["size"]), "mime": row["mime"], "author": row["author"],
         "ts": row["ts"],
+        "expires_at": row["expires_at"] if "expires_at" in keys else None,
     }
 
 
@@ -670,7 +713,7 @@ def prune_room(conn: sqlite3.Connection, room: str, retention_days: int | None) 
 
 
 def prune_all(conn: sqlite3.Connection) -> int:
-    total = 0
+    total = purge_expired_files(conn)
     for r in conn.execute(
         "SELECT name, retention_days FROM rooms WHERE retention_days IS NOT NULL AND retention_days > 0"
     ).fetchall():
