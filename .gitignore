@@ -1,6 +1,10 @@
 # Secrets & local state — never commit these
 tokens/
+# Every .env variant, not just the bare name. A backup like .env.bak-switchhost is
+# exactly as sensitive, and one reached a commit because only `.env` was matched.
 .env
+.env.*
+!.env.example
 docker-compose.override.yml
 # The DB itself is local state, but the directory must exist at clone time: Docker
 # creates a missing bind-mount source as root, which the non-root container user then
