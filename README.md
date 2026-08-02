@@ -98,7 +98,8 @@ The public URL is *configured*, never inferred: the admin is by definition on th
 their request can never reveal the tunnel hostname. Each route gets:
 
 - the `claude mcp add …` line, and the equivalent `.mcp.json`
-- the hook's `CHATROOM_URL` / `CHATROOM_TOKEN` / `CHATROOM_ROOM` exports, plus install steps
+- a hook install block that **fetches the hook from the server** (`GET /v1/hook`) rather
+  than assuming a checkout, and merges it into `~/.claude/settings.json` idempotently
 - a **paste-to-agent brief** stating the room, the agent's identity and role, and the
   untrusted-data rule — so a new agent can wire itself up and understand the room
 - the equivalent `admin add-token` command, for your records
@@ -186,7 +187,7 @@ extra rooms. Tokens are shown once and stored only as SHA-256. See
 docker compose run --rm chatroom python tests/test_e2e.py
 ```
 
-Spins up a live server and exercises 155 assertions over the same JSON-RPC path Claude Code
+Spins up a live server and exercises 163 assertions over the same JSON-RPC path Claude Code
 uses: token→identity, room isolation, concurrent claim contention, version conflicts, cursor
 advance, read-only enforcement, chat post/read/threading/isolation, REST + SSE surfaces, hook
 behaviour (including fail-open plus its debug diagnostics), revocation, the admin console's

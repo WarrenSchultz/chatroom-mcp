@@ -126,13 +126,41 @@ def client_setup(
         f"export CHATROOM_ROOM={shlex.quote(room)}"
     )
 
+    # Fetched from the server, not copied from a checkout: the box being set up has a
+    # token and Claude Code, not necessarily a clone of this repo. The settings merge is
+    # a python3 one-liner rather than hand-edited JSON because python3 is already a
+    # prerequisite (the hook is a python script) and hand-editing settings.json is the
+    # step most likely to clobber an existing config.
     hook_install = (
         "mkdir -p ~/.claude/hooks\n"
-        "cp hooks/chatroom_whats_new.py ~/.claude/hooks/\n"
-        "# then add to ~/.claude/settings.json (user scope keeps this box's token out of git):\n"
-        '#   "hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command",\n'
-        '#     "command": "python3 ~/.claude/hooks/chatroom_whats_new.py", "timeout": 10}]}]}\n'
-        "# Verify with:  CHATROOM_HOOK_DEBUG=1 python3 ~/.claude/hooks/chatroom_whats_new.py"
+        f"curl -fsSL -H {shlex.quote('Authorization: Bearer ' + token)} \\\n"
+        f"  {url}/v1/hook -o ~/.claude/hooks/chatroom_whats_new.py\n"
+        "\n"
+        "python3 - <<'EOF'\n"
+        "import json, pathlib\n"
+        "p = pathlib.Path.home() / '.claude' / 'settings.json'\n"
+        "d = json.loads(p.read_text()) if p.exists() else {}\n"
+        "cmd = 'python3 ' + str(pathlib.Path.home() / '.claude/hooks/chatroom_whats_new.py')\n"
+        "ups = d.setdefault('hooks', {}).setdefault('UserPromptSubmit', [])\n"
+        "if not any(h.get('command') == cmd for e in ups for h in e.get('hooks', [])):\n"
+        "    ups.append({'hooks': [{'type': 'command', 'command': cmd, 'timeout': 10}]})\n"
+        f"d.setdefault('env', {{}}).update({{'CHATROOM_URL': {url!r},\n"
+        f"                                 'CHATROOM_TOKEN': {token!r},\n"
+        f"                                 'CHATROOM_ROOM': {room!r}}})\n"
+        "p.parent.mkdir(parents=True, exist_ok=True)\n"
+        "p.write_text(json.dumps(d, indent=2) + '\\n'); p.chmod(0o600)\n"
+        "print('merged into', p)\n"
+        "EOF\n"
+        "\n"
+        "# Confirm it works. The variables are passed explicitly here because the ones\n"
+        "# written to settings.json are applied by Claude Code at session start, not by\n"
+        "# your shell — so a bare check would test an unset (or worse, a different) token.\n"
+        "CHATROOM_HOOK_DEBUG=1 \\\n"
+        f"  CHATROOM_URL={shlex.quote(url)} \\\n"
+        f"  CHATROOM_TOKEN={shlex.quote(token)} \\\n"
+        f"  CHATROOM_ROOM={shlex.quote(room)} \\\n"
+        "  python3 ~/.claude/hooks/chatroom_whats_new.py\n"
+        "# Then restart the Claude Code session so it picks up the hook and env."
     )
 
     # Operator-to-agent text. Deliberately states the room and the untrusted-data

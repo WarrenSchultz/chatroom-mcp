@@ -855,6 +855,37 @@ async def rest_whats_new(request: Request) -> JSONResponse:
         conn.close()
 
 
+@mcp.custom_route("/v1/hook", methods=["GET"])
+async def rest_hook_source(request: Request):
+    """Serve the UserPromptSubmit hook so a new box can install it without a clone.
+
+    A machine being provisioned usually has Claude Code and nothing else — telling it
+    to `cp hooks/chatroom_whats_new.py` refers to a directory that is not there. It can
+    always reach *this* server, though, since that is the point of the token it was just
+    given, so serving the script from here needs no GitHub access, works on a LAN with no
+    internet and for private forks, and guarantees the hook matches the running server.
+
+    Requires a bearer token (any role): not because the source is secret — it is Apache
+    2.0 and public — but so the fetch carries an Authorization header and therefore
+    survives an edge rule that blocks unauthenticated requests.
+    """
+    got = _rest_auth(request)
+    if isinstance(got, JSONResponse):
+        return got
+    conn, _ident = got
+    conn.close()
+    path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "hooks",
+                        "chatroom_whats_new.py")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            body = fh.read()
+    except OSError:
+        return JSONResponse({"error": "hook source not bundled with this server"},
+                            status_code=404)
+    return PlainTextResponse(body, headers={
+        "Content-Disposition": 'attachment; filename="chatroom_whats_new.py"'})
+
+
 @mcp.custom_route("/v1/tasks", methods=["GET"])
 async def rest_tasks(request: Request) -> JSONResponse:
     got = _rest_auth(request)

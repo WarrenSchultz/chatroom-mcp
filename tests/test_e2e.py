@@ -613,6 +613,15 @@ def main() -> int:
               "untrusted DATA" in setup["agent_brief"], setup["agent_brief"][-120:])
         check("agent brief warns about the hook consuming whats_new",
               "already delivered" in setup["agent_brief"])
+        check("hook install fetches from the server, not a local checkout",
+              "/v1/hook" in setup["hook_install"]
+              and "cp hooks/" not in setup["hook_install"], setup["hook_install"][:160])
+        check("hook install carries the token on the fetch (survives an edge auth rule)",
+              "Authorization: Bearer" in setup["hook_install"])
+        check("hook verify passes env explicitly, not relying on the shell",
+              "CHATROOM_HOOK_DEBUG=1" in setup["hook_install"]
+              and setup["hook_install"].count("CHATROOM_TOKEN=") >= 1
+              and "CHATROOM_URL=" in setup["hook_install"])
         check("host-CLI equivalent is surfaced for auditability",
               "add-token" in setup["admin_cli_equivalent"]
               and "--also-room" in setup["admin_cli_equivalent"])
@@ -695,6 +704,19 @@ def main() -> int:
             check("revoke reports how many tokens it killed", rev["revoked"] == 1, str(rev))
             check("the revoked token stops working",
                   "_tool_error" in Agent(got_tok["token"]).call("list_tasks"))
+            hooksrc = rc.get(f"{abase}/v1/hook",
+                             headers={"Authorization": f"Bearer {t_box1}"})
+            check("/v1/hook serves the hook source to any valid token",
+                  hooksrc.status_code == 200
+                  and "chatroom_activity" in hooksrc.text, str(hooksrc.status_code))
+            check("/v1/hook matches the bundled hook byte for byte",
+                  hooksrc.text == (ROOT / "hooks" / "chatroom_whats_new.py").read_text())
+            check("/v1/hook still requires a credential",
+                  rc.get(f"{abase}/v1/hook").status_code == 401)
+            check("/v1/hook is NOT console-gated — remote boxes must be able to fetch it",
+                  rc.get(f"{abase}/v1/hook",
+                         headers={"Authorization": f"Bearer {t_box1}",
+                                  "CF-Ray": "0000000000000000-TEST"}).status_code == 200)
             check("admin can delete a room it created",
                   rc.delete(f"{abase}/v1/rooms/adminmade", headers=sah).json()["ok"])
 
