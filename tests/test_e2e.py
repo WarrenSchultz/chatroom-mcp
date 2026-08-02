@@ -1200,6 +1200,61 @@ def main() -> int:
         check("...and says the token was rejected, not that the bus was unreachable",
               "401" in bad.stderr and "not recognised" in bad.stderr, bad.stderr[:160])
 
+        # Reported from the field by a second tunnel client: their first connect attempt
+        # got a 502 from the Cloudflare edge (transient, origin healthy). A watcher armed
+        # during one of those must survive it rather than exiting — but a bad credential
+        # must still fail fast, so the two cases have to stay distinguishable.
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class Flaky(BaseHTTPRequestHandler):
+            hits = 0
+            code = 502
+
+            def do_GET(self):                      # noqa: N802 - stdlib naming
+                Flaky.hits += 1
+                if Flaky.hits <= 2 and Flaky.code == 502:
+                    self.send_response(502)
+                    self.end_headers()
+                    return
+                if Flaky.code != 502:
+                    self.send_response(Flaky.code)
+                    self.end_headers()
+                    return
+                body = json.dumps({"agent": "flakybox", "default_room": "projA"}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):             # noqa: A002 - silence stdlib logging
+                pass
+
+        stub = HTTPServer(("127.0.0.1", 0), Flaky)
+        threading.Thread(target=stub.serve_forever, daemon=True).start()
+        stub_url = f"http://127.0.0.1:{stub.server_address[1]}"
+        try:
+            Flaky.hits, Flaky.code = 0, 502
+            p = subprocess.Popen([sys.executable, WATCH], stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True,
+                                 env={**watch_env(t_watch), "CHATROOM_URL": stub_url})
+            try:
+                _t.sleep(9.0)                      # spans the 1s + 2s retry backoff
+            finally:
+                p.terminate()
+                _, ferr = p.communicate(timeout=10)
+            check("a transient 502 at connect is retried, not fatal",
+                  Flaky.hits >= 3 and "as flakybox" in ferr, f"{Flaky.hits} hits | {ferr[:160]}")
+
+            Flaky.hits, Flaky.code = 0, 401
+            fatal = subprocess.run([sys.executable, WATCH], capture_output=True, text=True,
+                                   timeout=30,
+                                   env={**watch_env(t_watch), "CHATROOM_URL": stub_url})
+            check("...but a 401 still fails fast instead of burning the retry budget",
+                  fatal.returncode != 0 and Flaky.hits == 1, f"{Flaky.hits} hits")
+        finally:
+            stub.shutdown()
+
         # Cold start must not replay: an armed watcher reports what happens next.
         box1.call("post_message", {"body": "posted BEFORE the watcher arms"})
         out, _ = run_watcher(t_watch, {"CHATROOM_WATCH_MODE": "all"},

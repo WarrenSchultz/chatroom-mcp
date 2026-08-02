@@ -172,12 +172,41 @@ def _get_json(url: str, token: str) -> dict:
         return json.loads(resp.read().decode("utf-8", "replace"))
 
 
+#: Answers that mean "this will never work" — a wrong credential or a hostname the
+#: server will not accept. Retrying those is pointless noise. Anything else at connect
+#: time (502/503/504 from an edge, a refused socket) is transient by default.
+FATAL_CODES = (401, 403, 421)
+
+#: How long to keep trying to establish identity before giving up. A watcher armed
+#: during a transient edge 502 must not die of it — observed in the field, from a second
+#: tunnel client, on the very first connect attempt. Bounded rather than infinite so a
+#: genuinely dead bus still surfaces as a Monitor exit instead of a silent no-op.
+IDENTITY_RETRY_S = 60.0
+
+
 def _identity(base: str, token: str, room: str | None) -> tuple[str, str]:
-    """Ask the server who this credential is. /v1/rooms is side-effect free — it does
-    not touch the whats_new cursor the hook depends on."""
-    info = _get_json(f"{base}/v1/rooms", token)
-    agent = str(info.get("agent") or "")
-    return agent, room or str(info.get("default_room") or "")
+    """Ask the server who this credential is, retrying transient failures.
+
+    /v1/rooms is side-effect free — it does not touch the whats_new cursor the hook
+    depends on.
+    """
+    deadline = time.time() + IDENTITY_RETRY_S
+    delay = 1.0
+    while True:
+        try:
+            info = _get_json(f"{base}/v1/rooms", token)
+            agent = str(info.get("agent") or "")
+            return agent, room or str(info.get("default_room") or "")
+        except urllib.error.HTTPError as exc:
+            if exc.code in FATAL_CODES or time.time() >= deadline:
+                raise
+            _debug(f"identity: HTTP {exc.code}, retrying in {delay:.0f}s")
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            if time.time() >= deadline:
+                raise
+            _debug(f"identity: {exc}, retrying in {delay:.0f}s")
+        time.sleep(delay)
+        delay = min(delay * 2, 15.0)
 
 
 def _mention_re(agent: str, extra: str) -> "re.Pattern[str] | None":
@@ -366,10 +395,12 @@ def watch(base: str, token: str, room: str, agent: str, launch_mode: str) -> int
                     flush(now)
 
         except urllib.error.HTTPError as exc:
+            # A 502/503/504 from the edge is transient and falls through to the backoff
+            # below; only a credential or hostname the server will never accept is fatal.
             _debug(f"HTTP {exc.code} — {exc.reason}")
-            if exc.code in (401, 403):
+            if exc.code in FATAL_CODES:
                 _emit(f"[chatroom] {room}: watcher stopping — HTTP {exc.code} "
-                      f"(token rejected). Fix the credential and re-arm.")
+                      f"(credential or hostname rejected). Fix it and re-arm.")
                 return 1
         except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as exc:
             _debug(f"stream error: {exc}")
