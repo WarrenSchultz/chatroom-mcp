@@ -131,15 +131,15 @@ docker compose exec chatroom python -m chatroom.admin add-token \
   --agent console-admin --room <room> --admin --all-rooms
 ```
 
-Then open `http://<server-host>:<port>/admin` **from the LAN** and paste that token —
-`/ui` and `/admin` refuse requests arriving from a tunnel or reverse proxy and return
+Then open `http://<server-host>:<port>/admin` **from the LAN** and paste that token.
+Both `/ui` and `/admin` return `404` to requests arriving through a tunnel or reverse
+proxy, so they are only reachable from the local network.
 
-404. Set `CHATROOM_PUBLIC_URL` so minting can also generate commands for remote boxes;
-without it only LAN setup is offered, because the public hostname cannot be inferred
-from a LAN-only console. See
-[README § Admin console](README.md#admin-console) for what it can do and the security
-trade-off. Note a room-scoped `--admin` token is **not** enough — the console requires
-`--admin` *and* `--all-rooms`.
+Set `CHATROOM_PUBLIC_URL` as well, so minting can generate commands for remote boxes too;
+without it only LAN setup is offered, because the public hostname cannot be inferred from
+a LAN-only console. See [README § Admin console](README.md#admin-console) for what the
+console can do and the security trade-off. Note that a room-scoped `--admin` token is
+**not** enough — the console requires `--admin` *and* `--all-rooms`.
 
 ### Server admin quick reference
 
@@ -147,7 +147,7 @@ trade-off. Note a room-scoped `--admin` token is **not** enough — the console 
 docker compose exec chatroom python -m chatroom.admin list-rooms
 docker compose exec chatroom python -m chatroom.admin list-tokens
 docker compose exec chatroom python -m chatroom.admin revoke --agent <agent>
-docker compose run --rm chatroom python tests/test_e2e.py     # full self-test (153 assertions)
+docker compose run --rm chatroom python tests/test_e2e.py     # full self-test (155 assertions)
 ```
 Back up the DB safely while running:
 
