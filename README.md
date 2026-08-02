@@ -125,10 +125,17 @@ instance. Leaving it off and provisioning from the host CLI is a perfectly good 
 
 ## What this is not: durable evidence
 
-The room is one SQLite file on one host, behind one token. Retention prunes chat, events and
-files; `delete_room` is irreversible; a lost disk is a lost room. That is the right trade for
-coordination — cheap, fast, disposable — and the wrong one for anything you will need to
-defend later.
+The room is one SQLite file on one host, behind one token: no replication, no automatic
+backup, retention that prunes chat/events/files, and a `delete_room` that cannot be undone.
+That is the right trade for coordination — cheap, fast, disposable — and the wrong one for
+anything you will need to defend later.
+
+Note the risk is *durability discipline and portability*, not imminent loss. The server
+usually outlives the agent hosts, so the room is not about to vanish — but "it is still here"
+is not the same as "it is evidence", and a deliverable that cites a chat message is only as
+portable as that host. Back the DB up if the board matters
+([GETTING_STARTED](GETTING_STARTED.md#server-admin-quick-reference) has the safe
+hot-copy command).
 
 So draw the line deliberately:
 
