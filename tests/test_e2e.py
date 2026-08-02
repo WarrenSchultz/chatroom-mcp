@@ -590,6 +590,13 @@ def main() -> int:
             check(f"{page}: hidden attribute is CSS-guarded where it is used",
                   guarded or not uses_hidden,
                   f"uses hidden={uses_hidden} guard={guarded}")
+            # navigator.clipboard is undefined outside a secure context, and these
+            # consoles are LAN-only so plain HTTP on a LAN address is the normal way to
+            # reach them. A copy button that only calls it silently does nothing there.
+            if "navigator.clipboard" in code:
+                check(f"{page}: clipboard use has a non-secure-context fallback",
+                      "execCommand" in code and "isSecureContext" in code,
+                      "relies on navigator.clipboard alone")
         setup = provision.client_setup("https://bus.example.com", "box9", "cr_TESTTOKEN", "projA",
                                        extra_rooms=["projB"])
         check("generated CLI carries url, name and token",

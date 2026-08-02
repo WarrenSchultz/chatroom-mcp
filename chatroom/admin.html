@@ -204,10 +204,43 @@ function snip(title,body,cls){
           <button class="ghost" data-copy="${id}">copy</button></div>`;
 }
 
+// navigator.clipboard only exists in a secure context (https, localhost, 127.0.0.1).
+// This console is deliberately LAN-only, so the normal way to reach it is plain HTTP on
+// a LAN address — exactly where that API is undefined. Try it, fall back to the old
+// execCommand path, and if both fail select the text so Ctrl/Cmd-C still works.
+async function copyText(text, pre){
+  if(window.isSecureContext && navigator.clipboard){
+    try{ await navigator.clipboard.writeText(text); return "copied"; }catch(e){}
+  }
+  const ta=document.createElement("textarea");
+  ta.value=text; ta.setAttribute("readonly","");
+  ta.style.cssText="position:fixed;top:-1000px;opacity:0";
+  document.body.appendChild(ta);
+  ta.select(); ta.setSelectionRange(0,text.length);
+  let ok=false;
+  try{ ok=document.execCommand("copy"); }catch(e){ ok=false; }
+  document.body.removeChild(ta);
+  if(ok) return "copied";
+  // Last resort: highlight it in place and tell the operator to copy manually,
+  // rather than silently doing nothing.
+  if(pre){
+    const r=document.createRange(); r.selectNodeContents(pre);
+    const s=window.getSelection(); s.removeAllRanges(); s.addRange(r);
+  }
+  return "press Ctrl/Cmd-C";
+}
+
 function wireCopy(root){
-  root.querySelectorAll("[data-copy]").forEach(b=>b.onclick=()=>{
-    navigator.clipboard.writeText($("#"+b.dataset.copy).textContent);
-    b.textContent="copied"; setTimeout(()=>b.textContent="copy",1200);
+  root.querySelectorAll("[data-copy]").forEach(b=>b.onclick=async()=>{
+    const pre=$("#"+b.dataset.copy);
+    b.textContent=await copyText(pre.textContent, pre);
+    setTimeout(()=>b.textContent="copy",2000);
+  });
+  // Clicking the block selects all of it, so a manual copy never means dragging
+  // across a wrapped 40-character token and hoping you got the ends.
+  root.querySelectorAll("pre[id]").forEach(pre=>pre.onclick=()=>{
+    const r=document.createRange(); r.selectNodeContents(pre);
+    const s=window.getSelection(); s.removeAllRanges(); s.addRange(r);
   });
 }
 
