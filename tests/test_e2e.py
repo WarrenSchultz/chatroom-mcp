@@ -276,6 +276,52 @@ def main() -> int:
             check(f"observer cannot {tool}",
                   "_tool_error" in res and "read-only" in res["_tool_error"], str(res))
 
+        print("\n--- event history (read_events) ---")
+        ev_task = box1.call("create_task", {"title": "history probe"})["created"]["id"]
+        box2.call("claim_task", {"task_id": ev_task})
+        box2.call("update_task", {"task_id": ev_task, "status": "done"})
+        hist = box1.call("read_events", {"task_id": ev_task})
+        kinds = [e["kind"] for e in hist["events"]]
+        check("read_events reconstructs a task's transition sequence, in order",
+              kinds == ["task_created", "task_claimed", "task_updated"], str(kinds))
+        check("read_events reports the cursor was untouched",
+              hist.get("cursor_unchanged") is True)
+        # The whole point: list_tasks shows the end state, not how it got there.
+        cur_state = [t for t in box1.call("list_tasks")["tasks"] if t["id"] == ev_task][0]
+        check("...which list_tasks cannot do (it has only the final status)",
+              cur_state["status"] == "done" and "task_claimed" not in json.dumps(cur_state))
+        check("read_events filters by kind", all(
+            e["kind"] == "message"
+            for e in box1.call("read_events", {"kind": "message"})["events"]))
+
+        # Side-effect freedom is the property that makes it safe next to the hook.
+        box3.call("list_tasks")  # ensure box3 has a cursor row
+        pm = box1.call("post_message", {"body": "citation and cursor probe"})
+        before = box2.call("whats_new")          # advances box2 to now
+        for _ in range(3):
+            box2.call("read_events")
+        after = box2.call("whats_new")
+        check("read_events does not consume the cursor (whats_new stays empty after it)",
+              after["count"] == 0, f"before={before['count']} after={after['count']}")
+
+        print("\n--- stable citation across the two id spaces ---")
+        mev = [e for e in box1.call("read_events", {"kind": "message"})["events"]
+               if e["message_id"] == pm["message_id"]]
+        check("a chat event names the message it describes", len(mev) == 1, str(mev)[:160])
+        check("...and that id is NOT the event id (separate sequences)",
+              mev[0]["id"] != mev[0]["message_id"],
+              f"event {mev[0]['id']} vs message {mev[0]['message_id']}")
+        body = [m for m in box1.call("read_messages")["messages"]
+                if m["id"] == mev[0]["message_id"]]
+        check("so the cited id resolves to the actual message body",
+              len(body) == 1 and body[0]["body"] == "citation and cursor probe", str(body)[:120])
+        # A fresh agent in the SAME room, so its cursor still has the post ahead of it.
+        # (box3 lives in projB and would legitimately see nothing.)
+        fresh = Agent(mint("citeprobe", "projA"))
+        check("whats_new carries message_id too, so the hook path can cite as well",
+              any(e.get("message_id") == pm["message_id"]
+                  for e in fresh.call("whats_new")["events"]))
+
         print("\n--- agent roster ---")
         roster = box1.call("list_agents")
         names = {a["agent"] for a in roster["agents"]}

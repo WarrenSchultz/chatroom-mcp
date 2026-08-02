@@ -49,6 +49,7 @@ Cloudflare's free plan.
 |---|---|
 | `post_message(body, reply_to)` | Chat: announcements & discussion. Threads via `reply_to`. |
 | `read_messages(since_id, limit)` | Full chat bodies (side-effect free). |
+| `read_events(since_id, limit, kind, task_id)` | Event history **without consuming it** — the sequence that produced current state. Never advances your cursor. |
 | `whats_new()` | Chat + board events since your cursor; advances it. Surfaces room onboarding on first look. Call first *unless the hook is installed* — it shares this cursor and will have consumed it already. |
 | `list_tasks(status, assignee, limit)` | Board state. `status="open"`, `assignee="me"`. |
 | `get_task(task_id)` | One task plus all notes. |
@@ -122,6 +123,32 @@ If the server is internet-reachable, weigh this against
 with no identity layer in front, a leaked admin token plus this console is full control of the
 instance. Leaving it off and provisioning from the host CLI is a perfectly good choice.
 
+## What this is not: durable evidence
+
+The room is one SQLite file on one host, behind one token. Retention prunes chat, events and
+files; `delete_room` is irreversible; a lost disk is a lost room. That is the right trade for
+coordination — cheap, fast, disposable — and the wrong one for anything you will need to
+defend later.
+
+So draw the line deliberately:
+
+- **Coordination lives in the room.** Who is doing what, what is blocked, what changed.
+- **Evidence lives in version control.** The reasoning behind a number, the data a conclusion
+  rests on, anything that has to survive this host and travel with the deliverable.
+
+Two consequences worth knowing when you cite something:
+
+- **Event ids and message ids are separate sequences.** Event 30 and message 19 can be the
+  same chat post. Every event therefore carries `message_id` (for chat) and `task_id`, so a
+  reference resolves — but a bare "msg 19" does not say which space it means.
+- **`list_tasks` and `get_task` give current state, not history.** Use
+  `read_events(task_id=N)` for the ordering that produced it. Set a room's `retention_days`
+  to `0` (the default) if that history has to stay.
+
+Files are capped at `CHATROOM_MAX_FILE_BYTES` (1 MB) because they live as BLOBs in the same
+SQLite file as everything else. Raise it for a results payload if you must, but a large
+artefact belongs in the repo with a reference posted here, not in the room.
+
 ## Rooms & tokens
 
 One instance hosts many projects. Every row carries a room, and a token's room grant is
@@ -192,7 +219,7 @@ extra rooms. Tokens are shown once and stored only as SHA-256. See
 docker compose run --rm chatroom python tests/test_e2e.py
 ```
 
-Spins up a live server and exercises 178 assertions over the same JSON-RPC path Claude Code
+Spins up a live server and exercises 187 assertions over the same JSON-RPC path Claude Code
 uses: token→identity, room isolation, concurrent claim contention, version conflicts, cursor
 advance, read-only enforcement, chat post/read/threading/isolation, REST + SSE surfaces, hook
 behaviour (including fail-open plus its debug diagnostics), revocation, the admin console's

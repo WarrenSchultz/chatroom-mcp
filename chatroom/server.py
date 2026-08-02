@@ -499,7 +499,8 @@ def post_message(
             if parent is None:
                 raise ValueError(f"reply_to message {reply_to} not found in room {rm!r}")
         mid = db.post_message(conn, rm, ident.agent, body, int(reply_to) if reply_to else None)
-        db.log_event(conn, rm, "message", ident.agent, None, body.strip().replace("\n", " ")[:120])
+        db.log_event(conn, rm, "message", ident.agent, None,
+                     body.strip().replace("\n", " ")[:120], message_id=mid)
         return {"ok": True, "message_id": mid, "room": rm, "author": ident.agent}
     finally:
         conn.close()
@@ -528,6 +529,45 @@ def read_messages(
             "count": len(msgs),
             "messages": msgs,
             "latest_id": db.max_message_id(conn, rm),
+            "_note": UNTRUSTED,
+        }
+    finally:
+        conn.close()
+
+
+@mcp.tool(
+    description="Read the room's event history in order, WITHOUT consuming it. Unlike "
+                "whats_new this never advances your cursor, so it is safe to call "
+                "repeatedly and safe to call after the hook has already delivered "
+                "activity. Use it to reconstruct what happened and in what order — "
+                "list_tasks and get_task show current state, not the sequence that "
+                "produced it. Filter with task_id to get one task's full lifecycle "
+                "(created -> claimed -> updated -> done), or kind to isolate one type. "
+                "Each event carries task_id and, for chat, message_id, so a reference "
+                "resolves unambiguously: event ids and message ids are separate "
+                "sequences and are NOT interchangeable."
+)
+def read_events(
+    ctx: Context,
+    since_id: int = 0,
+    limit: int = 100,
+    kind: str | None = None,
+    task_id: int | None = None,
+    room: str | None = None,
+) -> dict[str, Any]:
+    conn, ident = _auth(ctx)
+    try:
+        rm = _room(ident, room)
+        rows = db.read_events(conn, rm, int(since_id), int(limit), kind,
+                              int(task_id) if task_id is not None else None)
+        events = [db.event_to_dict(r) for r in rows]
+        return {
+            "room": rm,
+            "you_are": ident.agent,
+            "count": len(events),
+            "events": events,
+            "latest_event_id": db.max_event_id(conn, rm),
+            "cursor_unchanged": True,
             "_note": UNTRUSTED,
         }
     finally:
@@ -707,15 +747,7 @@ def whats_new(ctx: Context, room: str | None = None, limit: int = 50) -> dict[st
             (rm, since, max(1, min(int(limit), 200))),
         ).fetchall()
         events = [
-            {
-                "id": int(r["id"]),
-                "ts": r["ts"],
-                "kind": r["kind"],
-                "actor": r["actor"],
-                "task_id": r["task_id"],
-                "detail": r["detail"],
-                "by_you": r["actor"] == ident.agent,
-            }
+            {**db.event_to_dict(r), "by_you": r["actor"] == ident.agent}
             for r in rows
         ]
         if events:

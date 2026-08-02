@@ -199,6 +199,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tokens ADD COLUMN admin INTEGER NOT NULL DEFAULT 0")
     if "all_rooms" not in tcols:
         conn.execute("ALTER TABLE tokens ADD COLUMN all_rooms INTEGER NOT NULL DEFAULT 0")
+    ecols = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
+    if "message_id" not in ecols:
+        # Events and messages have separate AUTOINCREMENT sequences, so "msg 19" read off
+        # the event log meant event 19, not message 19 — a citation that silently pointed
+        # at the wrong thing. Recording which message an event describes makes a reference
+        # resolvable. NULL for rows written before this column existed.
+        conn.execute("ALTER TABLE events ADD COLUMN message_id INTEGER")
     if "revoked_ts" not in tcols:
         # When the token was revoked, so "purge revocations older than N days" can mean
         # what it says. Rows revoked before this column existed keep NULL; readers fall
@@ -378,20 +385,58 @@ def log_event(
     actor: str,
     task_id: int | None = None,
     detail: str = "",
+    message_id: int | None = None,
 ) -> int:
     ts = now()
     cur = conn.execute(
-        "INSERT INTO events(room, ts, kind, task_id, actor, detail) VALUES (?,?,?,?,?,?)",
-        (room, ts, kind, task_id, actor, detail),
+        "INSERT INTO events(room, ts, kind, task_id, actor, detail, message_id) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (room, ts, kind, task_id, actor, detail, message_id),
     )
     eid = int(cur.lastrowid or 0)
     if _EVENT_HOOK is not None:
         try:
-            _EVENT_HOOK({"id": eid, "room": room, "ts": ts, "kind": kind,
-                         "actor": actor, "task_id": task_id, "detail": detail})
+            _EVENT_HOOK({"id": eid, "room": room, "ts": ts, "kind": kind, "actor": actor,
+                         "task_id": task_id, "message_id": message_id, "detail": detail})
         except Exception:
             pass
     return eid
+
+
+def event_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    """One event as returned to agents. message_id/task_id are the stable citation."""
+    keys = row.keys()
+    return {
+        "id": int(row["id"]),
+        "ts": row["ts"],
+        "kind": row["kind"],
+        "actor": row["actor"],
+        "task_id": row["task_id"],
+        "message_id": row["message_id"] if "message_id" in keys else None,
+        "detail": row["detail"],
+    }
+
+
+def read_events(
+    conn: sqlite3.Connection,
+    room: str,
+    since_id: int = 0,
+    limit: int = 50,
+    kind: str | None = None,
+    task_id: int | None = None,
+) -> list[sqlite3.Row]:
+    """Event history, oldest first. Never touches a cursor — this is a read, not a catch-up."""
+    sql = "SELECT * FROM events WHERE room=? AND id>?"
+    args: list[Any] = [room, int(since_id)]
+    if kind:
+        sql += " AND kind=?"
+        args.append(kind)
+    if task_id is not None:
+        sql += " AND task_id=?"
+        args.append(int(task_id))
+    sql += " ORDER BY id LIMIT ?"
+    args.append(max(1, min(int(limit), 500)))
+    return conn.execute(sql, args).fetchall()
 
 
 def max_event_id(conn: sqlite3.Connection, room: str) -> int:
