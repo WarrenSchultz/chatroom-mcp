@@ -29,11 +29,13 @@ Run:  python tests/test_e2e.py
 from __future__ import annotations
 
 import base64
+import datetime as dt
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -1343,6 +1345,113 @@ def main() -> int:
         check("a good credential does not reset the window for the address",
               rc.get(f"{BASE}/v1/tasks",
                      headers={"Authorization": "Bearer cr_spray_after"}).status_code == 429)
+
+        # --- self-describing clients -------------------------------------------
+        print("\n--- self-describing clients (manifest, version drift, announce) ---")
+        from chatroom import db as _db, server as _srv
+
+        man = rc.get(f"{BASE}/v1/client", headers=h)
+        # Not 200 rather than ==401: the hardening section above deliberately spends this
+        # address's failed-auth budget, so an unauthenticated call here may be throttled to
+        # 429 before it is ever judged on the credential. Either way it is refused.
+        check("/v1/client requires a token",
+              rc.get(f"{BASE}/v1/client").status_code != 200)
+        check("/v1/client returns a manifest", man.status_code == 200, str(man.status_code))
+        mj = man.json() if man.status_code == 200 else {}
+        check("...naming the server version",
+              mj.get("server", {}).get("version") == _srv.SERVER_VERSION,
+              str(mj.get("server")))
+        check("...and both client scripts",
+              set(mj.get("scripts", {})) == {"hook", "watch"}, str(list(mj.get("scripts", {}))))
+        hook_meta = mj.get("scripts", {}).get("hook", {})
+        check("...with a version parsed from the script",
+              hook_meta.get("version", "").count(".") >= 1, str(hook_meta.get("version")))
+        # The digest must match what /v1/hook actually serves, or the manifest is a
+        # second source of truth that can disagree with the file — the exact failure
+        # (a built-but-not-recreated container serving a stale copy) this is meant to catch.
+        served = rc.get(f"{BASE}/v1/hook", headers=h)
+        check("...and a sha256 matching the bytes /v1/hook serves",
+              hook_meta.get("sha256") == served.headers.get("X-Chatroom-Hook-SHA256"),
+              f"{hook_meta.get('sha256')} vs {served.headers.get('X-Chatroom-Hook-SHA256')}")
+
+        wn = rc.get(f"{BASE}/v1/whats_new?peek=1", headers=h)
+        check("whats_new advertises the canonical hook version in a header",
+              wn.headers.get("X-Chatroom-Hook-Version") == hook_meta.get("version"),
+              str(wn.headers.get("X-Chatroom-Hook-Version")))
+        check("...and the server version too",
+              wn.headers.get("X-Chatroom-Server-Version") == _srv.SERVER_VERSION)
+
+        # Version drift notice: compares the DECLARED version, not the bytes, so an
+        # intentionally adapted local copy is not branded stale forever.
+        sys.path.insert(0, str(ROOT / "hooks"))
+        import chatroom_whats_new as _hook
+        tmpdir = tempfile.mkdtemp(prefix="chatroom-notice-")
+        os.environ["TMPDIR"] = tmpdir
+        check("no drift notice when versions match",
+              _hook._version_notice(_hook.__version__, "tok", "ops") == "")
+        n1 = _hook._version_notice("99.0.0", "tok", "ops")
+        check("a newer server version produces one notice", n1.startswith("chatroom:"), n1)
+        check("...naming both versions",
+              _hook.__version__ in n1 and "99.0.0" in n1, n1)
+        check("...and is throttled so it cannot repeat every turn",
+              _hook._version_notice("99.0.0", "tok", "ops") == "")
+        os.environ["CHATROOM_HOOK_VERSION_CHECK"] = "off"
+        check("...and can be silenced entirely",
+              _hook._version_notice("99.0.0", "tok", "other-room") == "")
+        os.environ.pop("CHATROOM_HOOK_VERSION_CHECK")
+        check("an absent header is not treated as drift",
+              _hook._version_notice("", "tok", "ops") == "")
+
+        # Watcher liveness is opt-in: a box that never wanted push delivery must not be
+        # nagged about a watcher it deliberately does not run.
+        os.environ.pop("CHATROOM_WATCH_EXPECTED", None)
+        check("watcher notice stays silent when not opted in", _hook._watcher_notice() == "")
+        os.environ["CHATROOM_WATCH_EXPECTED"] = "1"
+        check("...reports a watcher that has never beaten once opted in",
+              "never reported" in _hook._watcher_notice())
+        beat = Path(tmpdir) / "chatroom-watch-heartbeat"
+        beat.write_text("now\n")
+        check("...stays silent while the heartbeat is fresh", _hook._watcher_notice() == "")
+        os.utime(beat, (time.time() - 4000, time.time() - 4000))
+        check("...and reports a stale heartbeat as dead",
+              "stale" in _hook._watcher_notice())
+        os.environ.pop("CHATROOM_WATCH_EXPECTED")
+
+        # Upgrade announcement: on version CHANGE only, never on a plain restart.
+        c2 = _db.connect(DB)
+        _db.ensure_schema(c2)
+        rooms = _db.list_rooms(c2)
+        _db.set_meta(c2, "announced_version", "0.0.1")
+        posted = _srv.announce_upgrade(c2, "9.9.9")
+        check("an upgrade is announced into every room",
+              posted == rooms and len(rooms) > 1, f"posted={posted} rooms={rooms}")
+        body = _db.read_messages(c2, rooms[0], 0, 200)[-1]["body"]
+        check("...naming both the old and new version",
+              "0.0.1" in body and "9.9.9" in body, body[:120])
+        check("...and recording the new version", _db.get_meta(c2, "announced_version") == "9.9.9")
+        check("a restart at the SAME version announces nothing",
+              _srv.announce_upgrade(c2, "9.9.9") == [])
+        _db.set_meta(c2, "announced_version", "9.9.9")
+        os.environ["CHATROOM_ANNOUNCE_UPGRADES"] = "off"
+        check("...and the announcement can be turned off",
+              _srv.announce_upgrade(c2, "10.0.0") == [])
+        os.environ.pop("CHATROOM_ANNOUNCE_UPGRADES")
+        # A fresh install has nobody to tell and nothing to compare against.
+        c2.execute("DELETE FROM meta WHERE key='announced_version'")
+        check("a first boot records the version silently",
+              _srv.announce_upgrade(c2, "1.0.0") == []
+              and _db.get_meta(c2, "announced_version") == "1.0.0")
+        c2.close()
+
+        # last_seen throttling: the auth path must not write on every request.
+        check("last_seen refreshes when never set", _db._last_seen_is_stale(None))
+        check("...is skipped when written moments ago",
+              not _db._last_seen_is_stale(_db.now()))
+        old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)).isoformat()
+        check("...refreshes again once stale", _db._last_seen_is_stale(old))
+        check("...and heals from an unparseable value", _db._last_seen_is_stale("not-a-date"))
+        future = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).isoformat()
+        check("...and from a clock that jumped forward", _db._last_seen_is_stale(future))
 
         print(f"\n{'=' * 62}")
         print(f"{len(PASS)} passed, {len(FAIL)} failed")

@@ -33,12 +33,18 @@ design. Three modes, and the mode can change while it runs:
     mentions    print only when this agent is named by someone else (default)
     all         print every chat message and board event
 
-Volume control on top of the mode:
+Volume control:
 
-  * Non-mention traffic is COALESCED, not dropped. Events accumulate and go out as
-    one summary line at most every CHATROOM_WATCH_MIN_INTERVAL seconds (default
-    60), so a busy room costs one turn a minute rather than one turn a message.
-  * Mentions BYPASS that window and flush anything pending with them. That is what
+  * In "all", non-mention traffic is COALESCED, not dropped. Events accumulate and
+    go out as one summary line at most every CHATROOM_WATCH_MIN_INTERVAL seconds
+    (default 60), so a busy room costs one turn a minute, not one turn a message.
+  * In "mentions", non-mention traffic is DROPPED. That is the point of the mode,
+    but note what a mention is: this agent's NAME in the text, bare or @-prefixed,
+    word-bounded. If peers write "you", or use a nickname that is not the agent id,
+    nothing matches and this watcher stays silent while looking perfectly healthy —
+    connected, no errors, just nothing it considers addressed here. Set
+    CHATROOM_WATCH_MENTIONS to the names people actually use, or run "all".
+  * Mentions BYPASS the window and flush anything pending with them. That is what
     lets two agents hold a real conversation at full speed while the same settings
     keep an unrelated flood down to a trickle — without anyone switching modes.
 
@@ -81,7 +87,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-__version__ = "1.0.0"
+__version__ = "1.1.1"
 
 MODES = ("hook-only", "mentions", "all")
 DEFAULT_MODE = "mentions"
@@ -337,10 +343,31 @@ def watch(base: str, token: str, room: str, agent: str, launch_mode: str) -> int
             pending = []
             last_emit = now
 
+    def beat() -> None:
+        """Touch a heartbeat file so something else can tell this watcher is alive.
+
+        A watcher dies silently: it is a background process whose whole job is to be quiet,
+        so "no notifications" looks identical whether it is idle or gone. Its lifetime is
+        also the host session's, so it does not survive a restart of that session. The
+        companion hook reads this file (opt-in, CHATROOM_WATCH_EXPECTED=1) and says so.
+
+        Touched on every frame INCLUDING idle keepalives, so a healthy-but-quiet room still
+        beats. Failure here is ignored — liveness reporting must never take down the thing
+        whose liveness it reports.
+        """
+        try:
+            tmp = os.environ.get("TMPDIR") or "/tmp"
+            with open(os.path.join(tmp, "chatroom-watch-heartbeat"), "w") as fh:
+                fh.write(f"{int(time.time())} {agent} {room} {__version__}\n")
+        except OSError:
+            pass
+
+    beat()                              # report alive at startup, before the first frame
     while True:
         try:
             for kind, payload in _frames(base, token, room, seen_event, seen_msg):
                 now = time.time()
+                beat()
                 if down_since:
                     if reported_outage:
                         _emit(f"[chatroom] {room}: stream recovered after "

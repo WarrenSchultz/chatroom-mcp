@@ -60,6 +60,18 @@ Environment:
     CHATROOM_HOOK_DEBUG=1  explain each outcome on stderr (see below)
     CHATROOM_HOOK_MIN_INTERVAL  seconds between checks on in-loop events (default 60)
     CHATROOM_HOOK_EVENT    override the detected event name (testing)
+    CHATROOM_HOOK_VERSION_CHECK=off   stop reporting that this script is out of date
+    CHATROOM_HOOK_VERSION_INTERVAL    seconds between drift notices (default 86400)
+    CHATROOM_WATCH_EXPECTED=1  this box runs a push watcher, so say when it dies
+    CHATROOM_WATCH_STALE_S     watcher heartbeat age that means dead (default 600)
+
+Two things this reports besides room activity, both throttled and both silent unless
+something is actually wrong:
+
+  * this script is older than the copy the server hands out (compared by __version__,
+    so a deliberately adapted local copy is not nagged forever)
+  * a push watcher was expected but its heartbeat has gone stale — opt-in, because
+    the hook cannot tell a dead watcher from a box that never ran one
 
 Because it fails open, every failure looks exactly like "nothing new". Set
 CHATROOM_HOOK_DEBUG=1 to have it say which happened on **stderr** — HTTP status
@@ -81,7 +93,7 @@ import os
 import sys
 import time
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 TIMEOUT = 5.0
 MAX_EVENTS = 25
@@ -97,6 +109,17 @@ THROTTLED_EVENTS = ("PostToolUse", "PostToolBatch", "Stop", "SubagentStop")
 #: file stat per call, not an HTTP round trip, and costs the model nothing unless there
 #: is actually something new to say.
 MIN_INTERVAL = float(os.environ.get("CHATROOM_HOOK_MIN_INTERVAL", "60"))
+
+#: Truthy/falsey spellings accepted for the flags below.
+_ON = ("1", "on", "true", "yes")
+_OFF = ("0", "off", "false", "no")
+
+#: How often a version-drift notice may repeat. A day: drift is worth knowing, never urgent.
+VERSION_NOTICE_INTERVAL = float(os.environ.get("CHATROOM_HOOK_VERSION_INTERVAL", "86400"))
+
+#: How long a watcher heartbeat may go unwritten before it is presumed dead. The watcher
+#: beats on every event and on its own idle timer, so several minutes of silence is real.
+WATCH_HEARTBEAT_STALE_S = float(os.environ.get("CHATROOM_WATCH_STALE_S", "600"))
 
 # Identify ourselves explicitly. urllib's default "Python-urllib/3.x" is treated as bot
 # traffic by Cloudflare (and most WAFs): published through a tunnel, the bus answers curl
@@ -193,6 +216,66 @@ def _mark(path: str, shown_id: int | None = None, onboarded: bool | None = None)
         pass
 
 
+def _version_notice(server_version: str, token: str, room: str | None) -> str:
+    """One line when this script is older than the copy the server hands out, else ''.
+
+    Compares the declared __version__, NOT the file's bytes. A byte comparison brands every
+    intentional local adaptation as "stale" forever — a deployment that has to source its
+    token differently, say — and such a copy is not wrong for differing. A version string
+    only moves when upstream deliberately moves it.
+
+    Throttled hard (default: once a day). Drift is not urgent, and a warning that appears
+    every turn is one you stop reading — which would cost the signal this exists to give.
+    Set CHATROOM_HOOK_VERSION_CHECK=off to silence it entirely.
+    """
+    if not server_version or server_version == __version__:
+        return ""
+    if os.environ.get("CHATROOM_HOOK_VERSION_CHECK", "on").strip().lower() in _OFF:
+        return ""
+    path = _throttle_file("versionnotice", token, room)
+    try:
+        if time.time() - os.stat(path).st_mtime < VERSION_NOTICE_INTERVAL:
+            return ""
+    except OSError:
+        pass                            # never checked, or unreadable: due
+    try:
+        with open(path, "w") as fh:
+            fh.write(server_version)
+    except OSError:
+        pass                            # cannot record it; warn now rather than never
+    return (f"chatroom: this hook is {__version__}; the server's canonical copy is "
+            f"{server_version}. Refresh with GET /v1/hook, or compare with GET /v1/client. "
+            f"(Silence: CHATROOM_HOOK_VERSION_CHECK=off)")
+
+
+def _watcher_notice() -> str:
+    """One line when a push watcher is EXPECTED but its heartbeat is stale, else ''.
+
+    Opt-in via CHATROOM_WATCH_EXPECTED=1, because the hook cannot tell "the watcher died"
+    from "this box does not run one" — and nagging a box that never wanted push delivery
+    is how a useful warning becomes noise. Opting in is the box asserting it wants one.
+
+    Reads a heartbeat file rather than scanning the process table: the watcher may be under
+    a different user or supervisor, and a liveness check should confirm the thing is WORKING
+    (writing beats) rather than merely present in `ps`.
+    """
+    if os.environ.get("CHATROOM_WATCH_EXPECTED", "").strip().lower() not in _ON:
+        return ""
+    tmp = os.environ.get("TMPDIR") or "/tmp"
+    path = os.path.join(tmp, "chatroom-watch-heartbeat")
+    try:
+        age = time.time() - os.stat(path).st_mtime
+    except OSError:
+        return ("chatroom: push watcher expected (CHATROOM_WATCH_EXPECTED=1) but it has "
+                "never reported. Arm it: Monitor(command=\"python3 chatroom_watch.py\", "
+                "persistent=true). Fetch it with GET /v1/watch.")
+    if age > WATCH_HEARTBEAT_STALE_S:
+        return (f"chatroom: push watcher last reported {int(age // 60)}m ago (stale). It "
+                f"does not outlive its host session — re-arm it with "
+                f"Monitor(persistent=true).")
+    return ""
+
+
 def _emit(event: str, text: str) -> None:
     """UserPromptSubmit takes plain stdout; the in-loop events need the JSON envelope."""
     if event == "UserPromptSubmit":
@@ -245,6 +328,9 @@ def main() -> int:
         })
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
+            # Rides along on a request that was happening anyway — no extra round trip
+            # just to ask whether this script is current.
+            server_hook_version = (resp.headers.get("X-Chatroom-Hook-Version") or "").strip()
     except urllib.error.HTTPError as exc:
         body = ""
         try:
@@ -297,8 +383,16 @@ def main() -> int:
     _debug(f"HTTP 200 from {url} — room={payload.get('room')!r} "
            f"agent={payload.get('agent')!r} events={len(events)} "
            f"onboarding={'yes' if onboarding else 'no'}")
+    # Housekeeping notices are independent of room traffic: a stale hook or a dead watcher
+    # on a quiet bus is exactly the case that would otherwise never be reported, since the
+    # quiet path returns early. Both are self-throttled, so this stays silent almost always.
+    notices = [n for n in (_version_notice(server_hook_version, token, room),
+                           _watcher_notice()) if n]
+
     if not events and not onboarding:
         _debug("nothing unread — this is a healthy quiet room, not a failure")
+        if notices:
+            _emit(event, "<chatroom_notice>\n" + "\n".join(notices) + "\n</chatroom_notice>")
         return 0
 
     lines = [
@@ -336,6 +430,10 @@ def main() -> int:
         "affects what you are about to do.",
         "</chatroom_activity>",
     ]
+    # Outside the activity block: these are facts about this agent's own tooling, not peer
+    # data, and the block above is explicitly framed as untrusted input from other agents.
+    if notices:
+        lines += ["<chatroom_notice>", *notices, "</chatroom_notice>"]
 
     _emit(event, "\n".join(lines))
     return 0
