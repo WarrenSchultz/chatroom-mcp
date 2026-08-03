@@ -245,6 +245,16 @@ def ui_enabled() -> bool:
     return _flag("CHATROOM_ENABLE_UI", "on")
 
 
+def announce_upgrades() -> bool:
+    """Whether the server posts a room message when its version changes.
+
+    On by default: the alternative is that peers discover an upgrade by accident, which is
+    what used to happen. Turn it off for a room where a bot writing to chat is unwelcome —
+    the events and /v1/client still record the change either way.
+    """
+    return _flag("CHATROOM_ANNOUNCE_UPGRADES", "on")
+
+
 #: Headers Cloudflare adds at its edge. A client cannot strip these on the way in — the
 #: edge sets them after the request is already past it — so their presence is a reliable
 #: "this arrived from outside" signal. A LAN client could *forge* them, but that only ever

@@ -33,6 +33,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -99,9 +100,15 @@ do not conclude from it that nothing is happening. Use read_messages() and
 list_tasks() to see current state, which are both side-effect free.
 """
 
+# Single source of truth: advertised in the MCP handshake, in /v1/client, and compared
+# against the stored value at startup to decide whether an upgrade is worth announcing.
+# It sat at 0.1.0 through roughly twenty commits of features, which made it useless as a
+# drift signal — a version that never moves reads as "nothing changed". Bump it here.
+SERVER_VERSION = "0.2.0"
+
 mcp = MCPServer(
     name="chatroom",
-    version="0.1.0",
+    version=SERVER_VERSION,
     instructions=INSTRUCTIONS,
 )
 
@@ -918,7 +925,14 @@ async def rest_whats_new(request: Request) -> JSONResponse:
                     "repo_url": info.get("repo_url"),
                     "onboarding_notes": info.get("onboarding_notes"),
                 }
-        return JSONResponse(payload)
+        # Ride along on the request the hook already makes every turn, so a stale hook can
+        # notice it is stale without spending a second round trip to find out. Header, not
+        # body: a client that does not care never has to parse it, and every existing
+        # consumer of this payload keeps working unchanged.
+        return JSONResponse(payload, headers={
+            "X-Chatroom-Hook-Version": _script_version(CLIENT_SCRIPTS["hook"]),
+            "X-Chatroom-Server-Version": SERVER_VERSION,
+        })
     except db.RoomError as exc:
         return JSONResponse({"error": str(exc)}, status_code=403)
     finally:
@@ -944,6 +958,60 @@ def _hook_digest(name: str = "chatroom_whats_new.py") -> str:
             return hashlib.sha256(fh.read()).hexdigest()
     except OSError:
         return ""
+
+
+_VERSION_RE = re.compile(r'^__version__\s*=\s*[\'"]([^\'"]+)[\'"]', re.M)
+
+
+def _script_version(name: str) -> str:
+    """The __version__ a bundled client script declares, or '' if absent/unreadable.
+
+    Parsed rather than imported: these scripts are standalone clients, and importing one
+    to read a constant would execute it. Read-and-regex is the boring, safe option.
+    """
+    try:
+        with open(_script_path(name), encoding="utf-8") as fh:
+            m = _VERSION_RE.search(fh.read())
+        return m.group(1) if m else ""
+    except OSError:
+        return ""
+
+
+def _client_manifest() -> dict[str, Any]:
+    """What this server believes the canonical client-side pieces are.
+
+    Version AND digest: a version is cheap to compare and survives an intentional local
+    fork, which a byte comparison would brand stale forever; a digest is what proves two
+    copies are literally identical when that is what matters.
+    """
+    out: dict[str, Any] = {
+        "server": {"name": "chatroom", "version": SERVER_VERSION},
+        "scripts": {},
+    }
+    for which, filename in CLIENT_SCRIPTS.items():
+        out["scripts"][which] = {
+            "filename": filename,
+            "version": _script_version(filename),
+            "sha256": _hook_digest(filename),
+            "url": f"/v1/{which}",
+        }
+    return out
+
+
+@mcp.custom_route("/v1/client", methods=["GET"])
+async def rest_client_manifest(request: Request):
+    """One request that answers 'am I running what this server expects?'.
+
+    The pieces were already discoverable — /v1/hook and /v1/watch each advertise a digest
+    header — but only by fetching both scripts in full and hashing them. An agent auditing
+    itself wants the answer, not 39 KB of source.
+    """
+    got = _rest_auth(request)
+    if isinstance(got, JSONResponse):
+        return got
+    conn, _ident = got
+    conn.close()
+    return JSONResponse(_client_manifest())
 
 
 @mcp.custom_route("/v1/hook", methods=["GET"])
@@ -1679,6 +1747,77 @@ def _start_prune_thread() -> None:
     threading.Thread(target=_loop, daemon=True, name="chatroom-prune").start()
 
 
+def announce_upgrade(conn: sqlite3.Connection, version: str = SERVER_VERSION,
+                     author: str = "chatroom-server") -> list[str]:
+    """Post one message per room when the server's version changes. Returns rooms posted to.
+
+    Why this exists: peers have no way to learn the bus was upgraded. A connected agent keeps
+    its tool list until it reconnects, and the client-side hook and watcher have no version
+    negotiation at all, so an upgrade is otherwise invisible until someone checks by hand. The
+    room is the one channel every agent already reads, so the bus says so itself.
+
+    Gated on CHANGE, not on boot: `restart: unless-stopped` means restarts are routine, and a
+    message per restart would be noise that trains everyone to ignore it. First boot records
+    the version silently — a fresh install has nothing to announce and no one to tell.
+
+    Author is a reserved non-agent name. Events carry it as the actor, so `whats_new` shows
+    it to every agent (the self-authored filter only suppresses your OWN events, and no agent
+    is called this).
+    """
+    if not security.announce_upgrades():
+        return []
+    previous = db.get_meta(conn, "announced_version")
+    if previous == version:
+        return []
+    db.set_meta(conn, "announced_version", version)
+    if previous is None:
+        conn.commit()
+        return []                       # fresh install: record, do not announce
+
+    hook_v = _script_version(CLIENT_SCRIPTS["hook"])
+    watch_v = _script_version(CLIENT_SCRIPTS["watch"])
+    body = (
+        f"chatroom server upgraded: {previous} -> {version}.\n"
+        f"Client scripts this server now considers canonical: "
+        f"chatroom_whats_new.py {hook_v or '?'}, chatroom_watch.py {watch_v or '?'}.\n"
+        f"Check yours with GET /v1/client (versions + sha256), fetch with GET /v1/hook "
+        f"or /v1/watch. Your existing token keeps working.\n"
+        f"Note: a connected MCP client keeps its old tool list until it reconnects."
+    )
+    posted: list[str] = []
+    for room in db.list_rooms(conn):
+        try:
+            msg_id = db.post_message(conn, room=room, author=author, body=body)
+            # Carry message_id so the event cites the message it describes rather than
+            # leaving a reader to guess which id the number refers to.
+            db.log_event(conn, room=room, kind="server_upgraded", actor=author,
+                         detail=f"{previous} -> {version}", message_id=msg_id)
+            posted.append(room)
+        except Exception as exc:        # one bad room must not block the others or boot
+            print(f"[chatroom] upgrade announce failed for room {room}: {exc}", flush=True)
+    conn.commit()
+    return posted
+
+
+def _announce_upgrade_at_boot() -> None:
+    """Best-effort: an announcement failure must never stop the server from starting."""
+    try:
+        conn = db.connect()
+    except Exception as exc:
+        print(f"[chatroom] upgrade announce skipped (no db): {exc}", flush=True)
+        return
+    try:
+        db.ensure_schema(conn)
+        posted = announce_upgrade(conn)
+        if posted:
+            print(f"[chatroom] announced upgrade to {SERVER_VERSION} in: "
+                  f"{', '.join(posted)}", flush=True)
+    except Exception as exc:
+        print(f"[chatroom] upgrade announce failed: {exc}", flush=True)
+    finally:
+        conn.close()
+
+
 def _startup_banner() -> None:
     """State the exposure posture once at boot, so a misconfiguration is visible
     in `docker compose logs` rather than only when a client gets a 421."""
@@ -1705,4 +1844,5 @@ app = security.ClientAddressMiddleware(
 
 _init_mqtt()
 _start_prune_thread()
+_announce_upgrade_at_boot()             # after _init_mqtt so the announcement also bridges
 _startup_banner()

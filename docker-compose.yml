@@ -32,6 +32,9 @@ services:
       CHATROOM_PUBLIC_URL: "${CHATROOM_PUBLIC_URL:-}"
       CHATROOM_AUTH_FAIL_LIMIT: "${CHATROOM_AUTH_FAIL_LIMIT:-20}"
       CHATROOM_AUTH_FAIL_WINDOW: "${CHATROOM_AUTH_FAIL_WINDOW:-300}"
+      # Post one chat message per room when this server's version changes (not on every
+      # restart). Off makes upgrades silent again — peers then only learn by asking.
+      CHATROOM_ANNOUNCE_UPGRADES: "${CHATROOM_ANNOUNCE_UPGRADES:-on}"
       # Optional MQTT bridge: publish every room event to <prefix>/<room>/<kind>. Empty host = off.
       CHATROOM_MQTT_HOST: "${CHATROOM_MQTT_HOST:-}"
       CHATROOM_MQTT_PORT: "${CHATROOM_MQTT_PORT:-1883}"
