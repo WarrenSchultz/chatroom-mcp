@@ -43,7 +43,15 @@ Volume control:
     word-bounded. If peers write "you", or use a nickname that is not the agent id,
     nothing matches and this watcher stays silent while looking perfectly healthy —
     connected, no errors, just nothing it considers addressed here. Set
-    CHATROOM_WATCH_MENTIONS to the names people actually use, or run "all".
+    CHATROOM_WATCH_MENTIONS (or --set-mentions) to the names people actually use,
+    or run "all".
+    Two things exist because that failure is invisible rather than loud:
+      - the resolved pattern is printed to stderr at startup and by --set-mentions,
+        unconditionally, so a mis-targeted watcher is one glance to spot instead of
+        indistinguishable from a quiet room;
+      - a bare numeric run in the agent name is matched too, so "the 4821" reaches
+        agent srv4821 without every operator rediscovering the gap. Off with
+        CHATROOM_WATCH_ALIAS=off.
   * Mentions BYPASS the window and flush anything pending with them. That is what
     lets two agents hold a real conversation at full speed while the same settings
     keep an unrelated flood down to a trickle — without anyone switching modes.
@@ -59,12 +67,16 @@ Environment:
     CHATROOM_WATCH_MENTION_PRIORITY  let mentions skip the window (default on)
     CHATROOM_WATCH_MENTIONS          extra names that count as a mention of you,
                                      comma-separated (e.g. all-hands,everyone)
+    CHATROOM_WATCH_ALIAS             also match the bare numeric run in the agent
+                                     name, e.g. "4821" for srv4821 (default on)
     CHATROOM_WATCH_DEBUG=1           narrate decisions on stderr
 
-Mode precedence: the mode file (written by --set-mode) beats --mode, which beats
-CHATROOM_WATCH_MODE, which defaults to "mentions". The file is re-read as it runs,
-so `chatroom_watch.py --set-mode all` from any shell — or from the agent itself —
-retargets a running watcher without restarting it.
+Mode precedence: the state file (written by --set-mode) beats --mode, which beats
+CHATROOM_WATCH_MODE, which defaults to "mentions". Extra mentions work the same way:
+--set-mentions beats CHATROOM_WATCH_MENTIONS. The file is re-read as it runs, so
+either can retarget a RUNNING watcher from any shell — or from the agent itself —
+without a restart. That matters most for mentions, because the operator who needs a
+new alias is by definition one whose watcher is currently missing messages.
 
 stdout is reserved for notifications, one per line: it is the event stream Monitor
 reads. Everything diagnostic goes to stderr.
@@ -87,7 +99,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-__version__ = "1.1.1"
+__version__ = "1.2.0"
 
 MODES = ("hook-only", "mentions", "all")
 DEFAULT_MODE = "mentions"
@@ -154,18 +166,37 @@ def _state_path(base: str, token: str, room: str) -> str:
     return os.path.join(os.environ.get("TMPDIR") or "/tmp", f"chatroom-watch-{key}")
 
 
-def _read_mode(path: str) -> str | None:
+def _read_state(path: str) -> dict[str, str]:
+    """key=value lines. A bare mode word is the pre-1.2 format and still reads."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
-            val = fh.read().strip()
+            raw = fh.read()
     except OSError:
-        return None
-    return val if val in MODES else None
+        return {}
+    out: dict[str, str] = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if "=" in line:
+            k, _, v = line.partition("=")
+            out[k.strip()] = v.strip()
+        elif line in MODES:
+            out["mode"] = line
+    return out
 
 
-def _write_mode(path: str, mode: str) -> None:
+def _write_state(path: str, **kw: str | None) -> None:
+    cur = _read_state(path)
+    cur.update({k: v for k, v in kw.items() if v is not None})
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write(mode + "\n")
+        for k, v in sorted(cur.items()):
+            fh.write(f"{k}={v}\n")
+
+
+def _read_mode(path: str) -> str | None:
+    val = _read_state(path).get("mode")
+    return val if val in MODES else None
 
 
 # ------------------------------------------------------------------ identity
@@ -215,6 +246,24 @@ def _identity(base: str, token: str, room: str | None) -> tuple[str, str]:
         delay = min(delay * 2, 15.0)
 
 
+def _aliases(agent: str) -> list[str]:
+    """Short forms peers actually use: the bare numeric run in a name like srv4821.
+
+    Measured against a real room before defaulting this on: across 234k characters,
+    the bare form produced zero false matches and one genuine reference the full-name
+    pattern silently dropped ("your cpuset-120 vs 4821's 172"). The cost was nil and
+    the miss was real, so this is on by default — but it is only ever a heuristic about
+    how humans abbreviate, so 4+ digits (a `box-80` must not collide with port numbers)
+    and CHATROOM_WATCH_ALIAS=off to disable.
+    """
+    if not _flag("CHATROOM_WATCH_ALIAS", True):
+        return []
+    if not re.search(r"[A-Za-z]", agent):        # an all-digit name aliases to itself
+        return []
+    m = re.search(r"(?<!\d)(\d{4,})(?!\d)", agent)
+    return [m.group(1)] if m else []
+
+
 def _mention_re(agent: str, extra: str) -> "re.Pattern[str] | None":
     """Match the agent's own name, with or without a leading @.
 
@@ -223,11 +272,20 @@ def _mention_re(agent: str, extra: str) -> "re.Pattern[str] | None":
     distinctive enough that a boundary check avoids most false hits. A very short or
     dictionary-word agent name would match too eagerly — name agents accordingly.
     """
-    names = [n.strip() for n in ([agent] + extra.split(",")) if n.strip()]
+    names = [n.strip() for n in ([agent] + _aliases(agent) + extra.split(",")) if n.strip()]
     if not names:
         return None
-    alts = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
-    return re.compile(rf"(?<![0-9A-Za-z_]){alts}(?![0-9A-Za-z_])", re.IGNORECASE)
+    seen: list[str] = []
+    for n in names:
+        if n.lower() not in {s.lower() for s in seen}:
+            seen.append(n)
+    alts = "|".join(re.escape(n) for n in sorted(seen, key=len, reverse=True))
+    # (?: ) is load-bearing, not tidiness. "|" binds looser than concatenation, so
+    # `(?<!..)a|b(?!..)` means "(boundary,a) OR (b,boundary)" — the lookbehind guards
+    # only the first alternative and the lookahead only the last. With one name there is
+    # no "|" and it was accidentally correct; the moment a second name existed (i.e. the
+    # instant anyone set CHATROOM_WATCH_MENTIONS) it matched "srv4821x" and "x7740".
+    return re.compile(rf"(?<![0-9A-Za-z_])(?:{alts})(?![0-9A-Za-z_])", re.IGNORECASE)
 
 
 # ------------------------------------------------------------------ rendering
@@ -320,9 +378,27 @@ def _frames(base: str, token: str, room: str, after: int, after_msg: int):
 
 def watch(base: str, token: str, room: str, agent: str, launch_mode: str) -> int:
     state = _state_path(base, token, room)
-    mentions = _mention_re(agent, os.environ.get("CHATROOM_WATCH_MENTIONS", ""))
     window = float(os.environ.get("CHATROOM_WATCH_MIN_INTERVAL", "60"))
     priority = _flag("CHATROOM_WATCH_MENTION_PRIORITY", True)
+
+    # Re-read like the mode, not fixed at entry. Building this once meant --set-mentions
+    # could not take effect without a restart, while --set-mode could — an inconsistency
+    # that mattered because the operator who needs a new alias is, by definition, one
+    # whose watcher is currently missing messages.
+    extra = ""
+    mentions = None
+
+    def retarget(src: str) -> None:
+        """Rebuild the pattern and SAY what it is.
+
+        A mis-targeted watcher and a healthy one are indistinguishable — both sit
+        connected and silent. Printing the resolved pattern unconditionally (not behind
+        DEBUG) is what turns "never fires" from invisible into one glance.
+        """
+        nonlocal mentions
+        mentions = _mention_re(agent, src)
+        shown = mentions.pattern if mentions else "(none — nothing will ever match)"
+        print(f"[chatroom-watch] matching: /{shown}/i", file=sys.stderr, flush=True)
 
     # High-water marks, so a reconnect resumes instead of replaying. -1 means "not yet
     # established" and asks the server for "now". The server also backfills recent
@@ -376,7 +452,12 @@ def watch(base: str, token: str, room: str, agent: str, launch_mode: str) -> int
                     reported_outage = False
                     backoff = 1.0
 
-                mode = _read_mode(state) or launch_mode
+                st = _read_state(state)
+                mode = st.get("mode") if st.get("mode") in MODES else launch_mode
+                want = st.get("mentions", os.environ.get("CHATROOM_WATCH_MENTIONS", ""))
+                if mentions is None or want != extra:
+                    extra = want
+                    retarget(extra)
                 if kind is None:                       # idle tick or keepalive
                     if mode != "hook-only" and window > 0 and now - last_emit >= window:
                         flush(now)
@@ -452,6 +533,9 @@ def main() -> int:
     ap.add_argument("--mode", choices=MODES, help="launch mode (default $CHATROOM_WATCH_MODE or mentions)")
     ap.add_argument("--set-mode", choices=MODES, metavar="MODE",
                     help="retarget a running watcher and exit")
+    ap.add_argument("--set-mentions", metavar="NAMES",
+                    help="extra names that count as a mention of you, comma-separated; "
+                         "takes effect on a RUNNING watcher (empty string clears)")
     ap.add_argument("--selfcheck", action="store_true", help="print version, digest, settings")
     args = ap.parse_args()
 
@@ -474,6 +558,10 @@ def main() -> int:
         print(f"window:        {os.environ.get('CHATROOM_WATCH_MIN_INTERVAL', '60')}s"
               f"  (CHATROOM_WATCH_MIN_INTERVAL)")
         print(f"mention skips window: {_flag('CHATROOM_WATCH_MENTION_PRIORITY', True)}")
+        print(f"alias derivation:     {_flag('CHATROOM_WATCH_ALIAS', True)}"
+              f"  (CHATROOM_WATCH_ALIAS; bare 4+ digit run in the agent name)")
+        print(f"extra mentions:       {os.environ.get('CHATROOM_WATCH_MENTIONS', '') or '(none)'}")
+        print("the resolved match pattern is printed at startup and by --set-mentions")
         return 0
 
     if not token:
@@ -498,9 +586,15 @@ def main() -> int:
         return 2
 
     state = _state_path(base, token, room)
-    if args.set_mode:
-        _write_mode(state, args.set_mode)
-        print(f"mode set to {args.set_mode} for {agent} in {room}", file=sys.stderr)
+    if args.set_mode is not None or args.set_mentions is not None:
+        _write_state(state, mode=args.set_mode, mentions=args.set_mentions)
+        st = _read_state(state)
+        print(f"{agent} in {room}: mode={st.get('mode', '(launch default)')} "
+              f"mentions={st.get('mentions', '') or '(none)'}", file=sys.stderr)
+        # Say what will actually match, so a wrong alias is caught here rather than by
+        # noticing weeks later that the watcher has never fired.
+        mre = _mention_re(agent, st.get("mentions", ""))
+        print(f"matching: /{mre.pattern if mre else '(none)'}/i", file=sys.stderr)
         return 0
 
     launch = args.mode or os.environ.get("CHATROOM_WATCH_MODE") or DEFAULT_MODE

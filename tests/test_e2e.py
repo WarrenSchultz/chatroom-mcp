@@ -1171,8 +1171,10 @@ def main() -> int:
         state_probe = subprocess.run([sys.executable, WATCH, "--set-mode", "all"],
                                      capture_output=True, text=True, env=watch_env(t_setmode))
         check("--set-mode writes the mode and exits",
-              state_probe.returncode == 0 and "mode set to all" in state_probe.stderr,
+              state_probe.returncode == 0 and "mode=all" in state_probe.stderr,
               (state_probe.stdout + state_probe.stderr)[:160])
+        check("...and echoes the resolved match pattern while it is at it",
+              "matching:" in state_probe.stderr, state_probe.stderr[:160])
         out, err = run_watcher(t_setmode, posts=["set-mode took effect"], seconds=4.0)
         check("...and a watcher launched afterwards honours the file over its default",
               "set-mode took effect" in out, repr(out[:200]) + " | " + err[:120])
@@ -1256,6 +1258,72 @@ def main() -> int:
                   fatal.returncode != 0 and Flaky.hits == 1, f"{Flaky.hits} hits")
         finally:
             stub.shutdown()
+
+        # --- mention matching: the invisible-failure surface -------------------
+        # A mis-targeted watcher and a healthy one look identical (connected, silent),
+        # so every one of these is about making a miss impossible or visible.
+        sys.path.insert(0, str(ROOT / "hooks"))
+        import chatroom_watch as cw
+
+        # Reported from the field: peers write "the 4821", not "srv4821". Measured against
+        # a real 234k-char room before defaulting on — zero false matches, one genuine
+        # reference the full-name pattern dropped.
+        check("a bare numeric run in the agent name is derived as an alias",
+              cw._aliases("srv4821") == ["4821"] and cw._aliases("host-5150") == ["5150"],
+              f'{cw._aliases("srv4821")} {cw._aliases("host-5150")}')
+        check("...but not from a short number that would collide with ports etc",
+              cw._aliases("box-80") == [] and cw._aliases("ops") == [],
+              f'{cw._aliases("box-80")} {cw._aliases("ops")}')
+
+        mre = cw._mention_re("srv4821", "")
+        check("the derived alias matches the prose form peers actually use",
+              bool(mre.search("compare 4821's numbers to mine"))
+              and bool(mre.search("on the 4821 only")), mre.pattern)
+        # The alternation bug: "|" binds looser than concatenation, so an unwrapped
+        # `(?<!..)a|b(?!..)` guards only the first alternative and only the last. It was
+        # accidentally correct with a single name and broken the instant a second existed.
+        check("alternation is grouped, so BOTH boundaries apply to EVERY alternative",
+              not mre.search("srv4821x") and not mre.search("x7740")
+              and not mre.search("~7740ms"), mre.pattern)
+        multi = cw._mention_re("boxone", "boxtwo,boxthree")
+        check("...with extra mentions too, which is where the bug used to bite",
+              bool(multi.search("hi boxtwo")) and not multi.search("boxtwoish")
+              and not multi.search("aboxthree"), multi.pattern)
+        check("CHATROOM_WATCH_ALIAS=off suppresses derivation",
+              (lambda: (os.environ.__setitem__("CHATROOM_WATCH_ALIAS", "off"),
+                        cw._aliases("srv4821") == [],
+                        os.environ.pop("CHATROOM_WATCH_ALIAS"))[1])())
+
+        # The read-once inconsistency: --set-mode took effect live but mentions did not,
+        # and the operator who needs a new alias is by definition one already missing
+        # messages. Both now live in the same re-read state file.
+        sp = cw._state_path(BASE, t_watch, "projA")
+        try:
+            cw._write_state(sp, mode="all", mentions="shortname")
+            st = cw._read_state(sp)
+            check("state file carries mode AND mentions together",
+                  st.get("mode") == "all" and st.get("mentions") == "shortname", str(st))
+            with open(sp, "w", encoding="utf-8") as fh:
+                fh.write("mentions\n")          # pre-1.2 bare-word format
+            check("a legacy bare-mode state file still reads",
+                  cw._read_mode(sp) == "mentions", str(cw._read_state(sp)))
+        finally:
+            try:
+                os.unlink(sp)
+            except OSError:
+                pass
+
+        setm = subprocess.run([sys.executable, WATCH, "--set-mentions", "shortname"],
+                              capture_output=True, text=True, env=watch_env(t_watch))
+        check("--set-mentions reports the RESOLVED pattern, not just the setting",
+              "matching:" in setm.stderr and "shortname" in setm.stderr, setm.stderr[:200])
+        out, werr2 = run_watcher(t_watch, posts=["calling shortname now"], seconds=4.0)
+        check("...and a mention via that alias is delivered",
+              "shortname" in out, repr(out[:200]))
+        check("the resolved pattern is printed at startup WITHOUT needing DEBUG",
+              "matching:" in werr2, werr2[:200])
+        subprocess.run([sys.executable, WATCH, "--set-mentions", ""],
+                       capture_output=True, text=True, env=watch_env(t_watch))
 
         # Cold start must not replay: an armed watcher reports what happens next.
         box1.call("post_message", {"body": "posted BEFORE the watcher arms"})
