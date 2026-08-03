@@ -23,7 +23,7 @@ one line per notification. Point Claude Code's Monitor tool at it and each line
 becomes a wake-up, including while the agent is idle.
 
     Monitor(command="python3 ~/.claude/hooks/chatroom_watch.py",
-            description="chatroom example-room", persistent=True)
+            description="chatroom <your-room>", persistent=True)
 
 Every line printed here costs a model turn, so what NOT to print is the whole
 design. Three modes, and the mode can change while it runs:
@@ -213,8 +213,9 @@ def _mention_re(agent: str, extra: str) -> "re.Pattern[str] | None":
     """Match the agent's own name, with or without a leading @.
 
     Bare-name matching rather than @-only: agents mention each other in prose at
-    least as often as they use the sigil, and these names ("agent-a", "agent-c")
-    are distinctive enough that a boundary check is enough to avoid false hits.
+    least as often as they use the sigil, and agent names are hostname-shaped and
+    distinctive enough that a boundary check avoids most false hits. A very short or
+    dictionary-word agent name would match too eagerly — name agents accordingly.
     """
     names = [n.strip() for n in ([agent] + extra.split(",")) if n.strip()]
     if not names:
