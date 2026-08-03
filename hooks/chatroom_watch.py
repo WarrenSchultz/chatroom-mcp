@@ -221,13 +221,18 @@ FATAL_CODES = (401, 403, 421)
 IDENTITY_RETRY_S = 60.0
 
 
-def _identity(base: str, token: str, room: str | None) -> tuple[str, str]:
+def _identity(base: str, token: str, room: str | None,
+              retry_s: float = IDENTITY_RETRY_S) -> tuple[str, str]:
     """Ask the server who this credential is, retrying transient failures.
 
     /v1/rooms is side-effect free — it does not touch the whats_new cursor the hook
     depends on.
+
+    retry_s=0 for one attempt: the retry budget exists so a watcher ARMING during an
+    edge blip survives it, but --selfcheck is a diagnostic a human is waiting on, and
+    making them wait a minute to be told the bus is down is its own defect.
     """
-    deadline = time.time() + IDENTITY_RETRY_S
+    deadline = time.time() + retry_s
     delay = 1.0
     while True:
         try:
@@ -553,15 +558,49 @@ def main() -> int:
         print(f"sha256:        {digest}")
         print(f"url:           {base}")
         print(f"token:         {'set' if token else 'MISSING'}")
-        print(f"room:          {room_env or '(token default)'}")
-        print(f"mode:          {os.environ.get('CHATROOM_WATCH_MODE') or DEFAULT_MODE} (env/default)")
+        launch_mode = os.environ.get("CHATROOM_WATCH_MODE") or DEFAULT_MODE
+
+        # "What is my watcher doing right now" is a LIVE question, so answer it live.
+        # This used to print the env/default only — honestly labelled, but it would say
+        # "mentions" while a running watcher was in "all", forever, and this is the
+        # command an operator runs precisely to check that. Same invisible-state defect
+        # as an unprintable match pattern; the room caught it one line over from the fix.
+        # Needs the room name to locate the per-(server, credential, room) state file,
+        # and the room comes from the server unless CHATROOM_ROOM pins it — so this is
+        # attempted, not assumed, and says so when it cannot.
+        agent = room = None
+        why = ""
+        if token:
+            try:
+                agent, room = _identity(base, token, room_env, retry_s=0)
+            except Exception as exc:                                  # noqa: BLE001
+                why = f"({type(exc).__name__}: {exc})"
+        print(f"agent:         {agent or '(unresolved)'}")
+        print(f"room:          {room or room_env or '(token default)'}")
+        if room:
+            sp = _state_path(base, token, room)
+            st = _read_state(sp)
+            live = st.get("mode") if st.get("mode") in MODES else None
+            print(f"mode:          {live or launch_mode}"
+                  f"  ({'state file' if live else 'env/default'}"
+                  f"{'' if live else ''}; launch default {launch_mode})")
+            print(f"state file:    {sp}{'' if st else '  (none yet)'}")
+            extra = st.get("mentions", os.environ.get("CHATROOM_WATCH_MENTIONS", ""))
+            mre = _mention_re(agent or "", extra)
+            print(f"extra mentions:       {extra or '(none)'}"
+                  f"{'  (from state file)' if 'mentions' in st else ''}")
+            print(f"matching:      /{mre.pattern if mre else '(none)'}/i")
+        else:
+            print(f"mode:          {launch_mode} (env/default) "
+                  f"— could NOT read live mode {why}")
+            print(f"extra mentions:       "
+                  f"{os.environ.get('CHATROOM_WATCH_MENTIONS', '') or '(none)'}")
+            print("matching:      (unresolved — needs the agent name from the server)")
         print(f"window:        {os.environ.get('CHATROOM_WATCH_MIN_INTERVAL', '60')}s"
               f"  (CHATROOM_WATCH_MIN_INTERVAL)")
         print(f"mention skips window: {_flag('CHATROOM_WATCH_MENTION_PRIORITY', True)}")
         print(f"alias derivation:     {_flag('CHATROOM_WATCH_ALIAS', True)}"
               f"  (CHATROOM_WATCH_ALIAS; bare 4+ digit run in the agent name)")
-        print(f"extra mentions:       {os.environ.get('CHATROOM_WATCH_MENTIONS', '') or '(none)'}")
-        print("the resolved match pattern is printed at startup and by --set-mentions")
         return 0
 
     if not token:

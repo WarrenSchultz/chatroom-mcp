@@ -1313,6 +1313,27 @@ def main() -> int:
             except OSError:
                 pass
 
+        # --selfcheck is the command an operator runs to answer "what is my watcher doing
+        # right now". Reporting the env default while a running watcher is in another mode
+        # is the same invisible-state defect as an unprintable match pattern.
+        subprocess.run([sys.executable, WATCH, "--set-mode", "all"],
+                       capture_output=True, text=True, env=watch_env(t_watch))
+        sc2 = subprocess.run([sys.executable, WATCH, "--selfcheck"], capture_output=True,
+                             text=True, env=watch_env(t_watch, {"CHATROOM_WATCH_MODE": "mentions"}))
+        check("--selfcheck reports the LIVE mode, not the env default",
+              "mode:" in sc2.stdout
+              and re.search(r"mode:\s+all\b.*state file", sc2.stdout), sc2.stdout[:400])
+        check("...and resolves the agent name and match pattern",
+              "watchbox" in sc2.stdout and "matching:" in sc2.stdout, sc2.stdout[:400])
+        # Must still be usable offline for digest verification — that is its other job.
+        off = subprocess.run([sys.executable, WATCH, "--selfcheck"], capture_output=True,
+                             text=True, timeout=60,
+                             env={**watch_env(t_watch), "CHATROOM_URL": "http://127.0.0.1:9"})
+        check("--selfcheck still works with the bus unreachable",
+              off.returncode == 0 and re.search(r"sha256:\s+[0-9a-f]{64}", off.stdout),
+              off.stdout[:200])
+        check("...and says it could not read the live mode rather than implying it did",
+              "could NOT read live mode" in off.stdout, off.stdout[:400])
         setm = subprocess.run([sys.executable, WATCH, "--set-mentions", "shortname"],
                               capture_output=True, text=True, env=watch_env(t_watch))
         check("--set-mentions reports the RESOLVED pattern, not just the setting",
@@ -1322,8 +1343,13 @@ def main() -> int:
               "shortname" in out, repr(out[:200]))
         check("the resolved pattern is printed at startup WITHOUT needing DEBUG",
               "matching:" in werr2, werr2[:200])
-        subprocess.run([sys.executable, WATCH, "--set-mentions", ""],
-                       capture_output=True, text=True, env=watch_env(t_watch))
+        # Remove the state file, not just blank its fields: it legitimately outranks the
+        # env, so anything left here silently overrides CHATROOM_WATCH_MODE in every later
+        # assertion — which is exactly how it broke the cold-start check once already.
+        try:
+            os.unlink(cw._state_path(BASE, t_watch, "projA"))
+        except OSError:
+            pass
 
         # Cold start must not replay: an armed watcher reports what happens next.
         box1.call("post_message", {"body": "posted BEFORE the watcher arms"})
