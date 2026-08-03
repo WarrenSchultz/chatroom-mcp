@@ -129,7 +129,20 @@ CREATE TABLE IF NOT EXISTS files (
     content BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_files_room_id ON files(room, id);
+
+-- Small server-owned key/value store. Currently holds the version this server last
+-- announced, so an upgrade is announced once rather than on every container restart.
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
+
+# How stale tokens.last_seen may get before a request pays to refresh it. resolve_token
+# runs on EVERY authenticated request, so writing last_seen unconditionally turned the
+# auth path into a write on a shared SQLite file for what is only ever read by a human
+# looking at the admin table. A minute of staleness costs that reader nothing.
+LAST_SEEN_THROTTLE_S = 60
 
 
 def now() -> str:
@@ -337,21 +350,53 @@ class Identity:
         return f"Identity(agent={self.agent!r}, rooms={self.allowed_rooms}{flags})"
 
 
+def _last_seen_is_stale(last_seen: str | None, throttle_s: int = LAST_SEEN_THROTTLE_S) -> bool:
+    """True if last_seen is missing, unparseable, in the future, or older than throttle_s.
+
+    Unparseable and future timestamps both refresh: a clock change or a hand-edited row
+    should heal on the next request rather than freeze the column forever.
+    """
+    if not last_seen:
+        return True
+    try:
+        seen = dt.datetime.fromisoformat(last_seen)
+    except (TypeError, ValueError):
+        return True
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=dt.timezone.utc)
+    age = (dt.datetime.now(dt.timezone.utc) - seen).total_seconds()
+    return not (0 <= age < throttle_s)
+
+
+def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES (?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value),
+    )
+
+
 def resolve_token(conn: sqlite3.Connection, token: str | None) -> Identity:
-    """Map a bearer token to an Identity, touching last_seen."""
+    """Map a bearer token to an Identity, refreshing last_seen at most once a minute."""
     if not token:
         raise AuthError("missing bearer token")
     th = hash_token(token)
     row = conn.execute(
-        "SELECT agent_name, default_room, allowed_rooms, revoked, readonly, admin, all_rooms "
-        "FROM tokens WHERE token_hash=?",
+        "SELECT agent_name, default_room, allowed_rooms, revoked, readonly, admin, all_rooms, "
+        "last_seen FROM tokens WHERE token_hash=?",
         (th,),
     ).fetchone()
     if row is None:
         raise AuthError("unknown token")
     if row["revoked"]:
         raise AuthError("token revoked")
-    conn.execute("UPDATE tokens SET last_seen=? WHERE token_hash=?", (now(), th))
+    if _last_seen_is_stale(row["last_seen"]):
+        conn.execute("UPDATE tokens SET last_seen=? WHERE token_hash=?", (now(), th))
     try:
         allowed = json.loads(row["allowed_rooms"]) or []
     except (TypeError, ValueError):
