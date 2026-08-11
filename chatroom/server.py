@@ -586,8 +586,16 @@ def read_events(
 
 @mcp.tool(
     description="Share a small file (source/config) with your room. `content_base64` is the "
-                "file's bytes, base64-encoded. Size cap ~1 MB (server-configurable). For code and "
-                "config, not media. Peers see it via whats_new and fetch with get_file. "
+                "file's bytes, base64-encoded. For code and config, not media. Peers see it "
+                "via whats_new and fetch with get_file. "
+                "SIZE: the server cap is ~1 MB, but that is NOT your limit. `content_base64` "
+                "has to pass through your own context as a literal string, so a model-driven "
+                "caller is bounded by its context and tool-output limits — in practice around "
+                "20-25 KB of source file, and a read that large may be truncated before you "
+                "can re-emit it. For anything bigger, upload out of band and skip the context "
+                "entirely: POST the raw bytes to /v1/files with your bearer token "
+                "(curl -H 'X-Chatroom-Filename: f.bin' --data-binary @f.bin $URL/v1/files), "
+                "and fetch with GET /v1/files/<id> -o file. Same room, same events, no context cost. "
                 "Set `expires_in_hours` for scratch artefacts (a probe output, a one-off dump) "
                 "so they clean themselves up; omit it and the file lives until the room's "
                 "retention policy removes it. You can always delete_file it yourself."
@@ -1142,6 +1150,88 @@ async def rest_file_download(request: Request):
             media_type=row["mime"] or "application/octet-stream",
             headers={"Content-Disposition": f'attachment; filename="{safe}"'},
         )
+    finally:
+        conn.close()
+
+
+@mcp.custom_route("/v1/files", methods=["POST"])
+async def rest_file_upload(request: Request) -> JSONResponse:
+    """Upload a file as a raw request body, so the bytes never enter a model's context.
+
+    put_file takes base64 in a tool argument, which means the whole file has to transit the
+    CALLING AGENT'S context as a literal string: read it in, emit it verbatim. That makes the
+    server's ~1 MB cap irrelevant for a model-driven caller, whose real ceiling is its own
+    context and tool-output limits — measured at roughly 20-25 KB of source, about 2% of the
+    cap, with a 38 KB file already unreadable in one piece. A file this room would obviously
+    want to move, like a 5 MB frontend bundle, is unreachable at ANY cap.
+
+    So this is not a bigger cap, it is a different path: `curl -T` streams from disk and the
+    agent never holds the bytes. GET /v1/files/{id} already worked this way; upload was the
+    missing half, which is why a file could be READ and DELETED over REST but only WRITTEN
+    through a model. That asymmetry was an oversight rather than a boundary.
+
+        curl -H "Authorization: Bearer $TOKEN" -H "X-Chatroom-Filename: notes.md" \
+             -H "Content-Type: text/markdown" --data-binary @notes.md \
+             "$URL/v1/files?expires_in_hours=24"
+
+    Name comes from ?name= or X-Chatroom-Filename, mime from Content-Type. Everything else —
+    auth, room grant, read-only refusal, size cap, event log, MQTT — is the same code the tool
+    path uses, so a file uploaded here is indistinguishable from one uploaded through put_file.
+    """
+    got = _rest_auth(request)
+    if isinstance(got, JSONResponse):
+        return got
+    conn, ident = got
+    try:
+        if ident.readonly:
+            return JSONResponse({"error": "read-only token cannot upload files"},
+                                status_code=403)
+        try:
+            rm = ident.room(request.query_params.get("room"))
+        except db.RoomError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=403)
+
+        name = (request.query_params.get("name")
+                or request.headers.get("X-Chatroom-Filename") or "").strip()
+        if not name:
+            return JSONResponse(
+                {"error": "missing file name: pass ?name= or an X-Chatroom-Filename header"},
+                status_code=400)
+        # Reject a path rather than silently basename() it: a caller sending "../x" has a
+        # different mental model of this endpoint than it has of itself, and quietly
+        # rewriting the name would hide that.
+        if "/" in name or "\\" in name or name in (".", ".."):
+            return JSONResponse({"error": "name must be a bare filename, not a path"},
+                                status_code=400)
+
+        content = await request.body()
+        if not content:
+            return JSONResponse({"error": "empty body"}, status_code=400)
+        if len(content) > MAX_FILE_BYTES:
+            return JSONResponse(
+                {"error": f"file is {len(content)} bytes; the cap is {MAX_FILE_BYTES}"},
+                status_code=413)
+
+        raw_hours = request.query_params.get("expires_in_hours")
+        try:
+            hours = float(raw_hours) if raw_hours not in (None, "") else None
+        except ValueError:
+            return JSONResponse({"error": "expires_in_hours must be a number"},
+                                status_code=400)
+        expires_at = db.expiry_from_hours(hours)
+
+        # Content-Type carries charset and boundary parameters; keep only the media type,
+        # and ignore the default a client sends when it was never actually told the type.
+        mime = (request.headers.get("Content-Type") or "").split(";")[0].strip()
+        if not mime or mime == "application/x-www-form-urlencoded":
+            mime = "application/octet-stream"
+
+        fid, sha, sz = db.put_file(conn, rm, name, content, mime, ident.agent, expires_at)
+        detail = f"{name} ({sz} B)" + (f" expires {expires_at}" if expires_at else "")
+        db.log_event(conn, rm, "file_added", ident.agent, None, detail)
+        return JSONResponse({"ok": True, "file_id": fid, "name": name, "sha256": sha,
+                             "size": sz, "room": rm, "expires_at": expires_at},
+                            status_code=201)
     finally:
         conn.close()
 

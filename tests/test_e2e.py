@@ -404,6 +404,55 @@ def main() -> int:
               rc.get(f"{BASE}/v1/files/{fid}",
                      headers={"Authorization": f"Bearer {t_box3}"}).status_code == 403)
 
+        # --- REST upload: the half that lets bytes skip a model's context -------
+        # A payload deliberately larger than a model could comfortably re-emit as base64,
+        # which is the entire reason this route exists.
+        big = ("x" * 200_000).encode()
+        up = rc.post(f"{BASE}/v1/files", content=big,
+                     headers={**h, "X-Chatroom-Filename": "big.bin",
+                              "Content-Type": "application/octet-stream"})
+        check("REST upload accepts a raw body", up.status_code == 201, str(up.status_code))
+        uj = up.json() if up.status_code == 201 else {}
+        check("...reporting size and sha256", uj.get("size") == len(big) and len(uj.get("sha256", "")) == 64,
+              str(uj)[:120])
+        # Round-trip byte-for-byte: an upload path that corrupts is worse than none.
+        back = rc.get(f"{BASE}/v1/files/{uj.get('file_id')}", headers=h)
+        check("...and the bytes come back identical", back.content == big,
+              f"{len(back.content)} vs {len(big)}")
+        check("...visible to peers as a file_added event",
+              any(e.get("kind") == "file_added" and "big.bin" in (e.get("detail") or "")
+                  for e in rc.get(f"{BASE}/v1/whats_new?peek=1",
+                                  headers={"Authorization": f"Bearer {t_box2}"}).json()["events"]))
+        check("upload takes the name from ?name= too",
+              rc.post(f"{BASE}/v1/files?name=q.txt", content=b"q", headers=h).status_code == 201)
+        check("upload without a name is refused",
+              rc.post(f"{BASE}/v1/files", content=b"q", headers=h).status_code == 400)
+        check("upload refuses a path rather than silently basenaming it",
+              rc.post(f"{BASE}/v1/files?name=../escape", content=b"q", headers=h).status_code == 400)
+        check("upload refuses an empty body",
+              rc.post(f"{BASE}/v1/files?name=e.txt", content=b"", headers=h).status_code == 400)
+        check("upload refuses a read-only token",
+              rc.post(f"{BASE}/v1/files?name=ro.txt", content=b"q",
+                      headers={"Authorization": f"Bearer {t_obs}"}).status_code == 403)
+        check("upload refuses an ungranted room",
+              rc.post(f"{BASE}/v1/files?name=x.txt&room=projA", content=b"q",
+                      headers={"Authorization": f"Bearer {t_box3}"}).status_code == 403)
+        check("upload requires a token at all",
+              rc.post(f"{BASE}/v1/files?name=x.txt", content=b"q").status_code != 201)
+        check("upload honours expires_in_hours",
+              (rc.post(f"{BASE}/v1/files?name=tmp.txt&expires_in_hours=1", content=b"q",
+                       headers=h).json() or {}).get("expires_at") is not None)
+        check("upload rejects a non-numeric expiry",
+              rc.post(f"{BASE}/v1/files?name=t2.txt&expires_in_hours=soon", content=b"q",
+                      headers=h).status_code == 400)
+        # Content-Type carries "; charset=", which must not end up in the stored mime.
+        ct = rc.post(f"{BASE}/v1/files?name=n.md", content=b"# hi",
+                     headers={**h, "Content-Type": "text/markdown; charset=utf-8"})
+        check("upload stores the media type without charset parameters",
+              rc.get(f"{BASE}/v1/files/{ct.json()['file_id']}",
+                     headers=h).headers.get("content-type", "").startswith("text/markdown"),
+              str(ct.json()))
+
         print("\n--- file expiry & deletion ---")
         blob = base64.b64encode(b"scratch").decode()
         perm = box1.call("put_file", {"name": "keep.txt", "content_base64": blob})
