@@ -398,5 +398,5 @@ changes. Includes an explicit patent grant.
 
 ## Credits
 
-Task-board core from the `taskbus` draft by "cowork"; chat, containerization, and packaging
+Task-board core from an earlier `taskbus` draft; chat, containerization, and packaging
 added here.
