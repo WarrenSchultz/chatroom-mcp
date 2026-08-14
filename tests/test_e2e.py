@@ -1356,6 +1356,27 @@ def main() -> int:
                 fh.write("mentions\n")          # pre-1.2 bare-word format
             check("a legacy bare-mode state file still reads",
                   cw._read_mode(sp) == "mentions", str(cw._read_state(sp)))
+
+            # The compatibility that matters is OLD reader / NEW file: this file steers a
+            # process that has been running for days, so the reader predates the writer by
+            # construction. A pre-1.2 reader consumes the whole file and compares it to
+            # MODES, so a `mode=x` line parses as None and it silently keeps its launch
+            # mode -- a control that reports success and does nothing. Found in production
+            # after --set-mode was ignored twice by an 11-day-old watcher.
+            def legacy_read(p):                 # verbatim pre-1.2 _read_mode
+                with open(p, encoding="utf-8") as fh:
+                    v = fh.read().strip()
+                return v if v in cw.MODES else None
+
+            cw._write_state(sp, mode="hook-only")
+            check("a mode-only write stays parseable by a PRE-1.2 reader",
+                  legacy_read(sp) == "hook-only", repr(open(sp).read()))
+            check("...and by the current one", cw._read_mode(sp) == "hook-only",
+                  repr(open(sp).read()))
+            cw._write_state(sp, mentions="alias1")
+            check("adding mentions switches to key=value (old reader degrades, as designed)",
+                  cw._read_state(sp) == {"mode": "hook-only", "mentions": "alias1"},
+                  repr(open(sp).read()))
         finally:
             try:
                 os.unlink(sp)

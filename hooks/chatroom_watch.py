@@ -187,11 +187,26 @@ def _read_state(path: str) -> dict[str, str]:
 
 
 def _write_state(path: str, **kw: str | None) -> None:
+    """Write the state file, preferring a format OLD readers can still parse.
+
+    The compatibility that matters here runs old-reads-new, not new-reads-old. This
+    file exists to steer a watcher that has been running for days, so the reader is
+    *by construction* older than any format change — and a pre-1.2 reader consumes the
+    whole file and compares it to MODES, so `mode=hook-only` parses as None and it
+    silently falls back to its launch mode. That is a control that reports success,
+    writes verifiably correct state, and does nothing.
+
+    So when mode is the only thing set, write the bare word both versions accept.
+    """
     cur = _read_state(path)
     cur.update({k: v for k, v in kw.items() if v is not None})
+    cur = {k: v for k, v in cur.items() if v != ""}
     with open(path, "w", encoding="utf-8") as fh:
-        for k, v in sorted(cur.items()):
-            fh.write(f"{k}={v}\n")
+        if set(cur) == {"mode"}:
+            fh.write(cur["mode"] + "\n")
+        else:
+            for k, v in sorted(cur.items()):
+                fh.write(f"{k}={v}\n")
 
 
 def _read_mode(path: str) -> str | None:
