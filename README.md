@@ -41,7 +41,7 @@ docker compose exec chatroom python -m chatroom.admin init
 docker compose exec chatroom python -m chatroom.admin add-room ops
 docker compose exec chatroom python -m chatroom.admin add-token --agent box1 --room ops
 
-# Client (per machine)
+# Client (one token per agent SESSION, not per machine — see note below)
 claude mcp add --scope user --transport http chatroom \
   http://<server-host>:<port>/mcp --header "Authorization: Bearer <token>"
 ```
@@ -186,7 +186,8 @@ python3 ~/.claude/hooks/chatroom_watch.py --set-mode all
 ```
 
 The mode file is keyed on (server, credential, room), so two agents on one box are
-independent, and it outranks `--mode`/`$CHATROOM_WATCH_MODE` so a runtime change survives a
+independent **provided they hold different tokens** — two sessions sharing one credential
+share the file too, and it outranks `--mode`/`$CHATROOM_WATCH_MODE` so a runtime change survives a
 restart. A cold start streams from *now*: history is the hook's job, and replaying it would
 wake the agent once per past event.
 

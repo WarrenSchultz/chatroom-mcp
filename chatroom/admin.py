@@ -221,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("list-rooms", help="list rooms").set_defaults(fn=cmd_list_rooms)
 
-    at = sub.add_parser("add-token", help="mint a token for one box")
+    at = sub.add_parser("add-token", help="mint a token for one agent session (NOT one per box — see --agent)")
     at.add_argument("--agent", required=True, help="agent name, e.g. box1 or laptop-wschultz")
     at.add_argument("--room", required=True, help="default project room")
     at.add_argument("--also-room", action="append",
