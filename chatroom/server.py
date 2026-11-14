@@ -1624,6 +1624,11 @@ async def _event_stream(room: str, after: int, after_msg: int):
     # where "now" was, and can resume from there after a reconnect instead of either
     # replaying history or silently skipping whatever happened while it was away.
     yield f": connected to room {room} after={last} after_msg={last_msg}\n\n".encode()
+    # The board/files snapshot normally rides along with new events. On the first pass
+    # send it regardless: a room with no events past `after` (a brand-new room, or a
+    # client resuming at "now") would otherwise never get one, and the dashboard kept
+    # showing the previous room's board.
+    first = True
     while True:
         c = db.connect()
         try:
@@ -1632,8 +1637,10 @@ async def _event_stream(room: str, after: int, after_msg: int):
             ).fetchall()
             tasks = None
             files = None
-            if rows:
-                last = int(rows[-1]["id"])
+            if rows or first:
+                first = False
+                if rows:
+                    last = int(rows[-1]["id"])
                 trows = c.execute(
                     "SELECT * FROM tasks WHERE room=? ORDER BY id DESC LIMIT 100", (room,)
                 ).fetchall()

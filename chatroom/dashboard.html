@@ -246,6 +246,7 @@ async function start(){
 async function watch(){
   stopStream();
   $("#chat").innerHTML="";$("#log").innerHTML="";$("#files").innerHTML="";chatN=0;$("#ccnt").textContent="";$("#fcnt").textContent="";
+  $("#board").innerHTML='<tr><td colspan="5" class="muted">loading…</td></tr>';$("#cnt").textContent="";
   if(!activeRoom){$("#msg").textContent="no room";return}
   const url="/v1/stream?after=all&room="+encodeURIComponent(activeRoom);
   ctl=new AbortController();$("#msg").textContent="connecting…";

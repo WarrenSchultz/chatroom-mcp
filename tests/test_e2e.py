@@ -1447,6 +1447,10 @@ def main() -> int:
                 pass
         check("/v1/stream honours after_msg (no replay on reconnect)",
               "event: chat" not in got, repr(got[:200]))
+        # No events past `after` used to mean no board frame at all, so the dashboard
+        # kept the previous room's board on screen (hit with a brand-new room).
+        check("/v1/stream sends a board snapshot even with no new events",
+              "event: board" in got, repr(got[:200]))
 
         # The server must hand out the watcher the same way it hands out the hook, or a
         # remote box has no way to get it without a clone.
