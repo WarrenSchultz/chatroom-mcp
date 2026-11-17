@@ -99,7 +99,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 MODES = ("hook-only", "mentions", "all")
 DEFAULT_MODE = "mentions"
@@ -159,11 +159,19 @@ def _emit(line: str) -> None:
 
 # ------------------------------------------------------------------ mode file
 
+def _tmpdir() -> str:
+    """Where state files live. Windows sets TEMP/TMP, not TMPDIR, and has no /tmp, so a
+    bare TMPDIR-or-/tmp fallback meant the mode file and heartbeat were silently never
+    written there. Must match the hook's _tmpdir(): it reads this heartbeat."""
+    return (os.environ.get("TMPDIR") or os.environ.get("TEMP")
+            or os.environ.get("TMP") or "/tmp")
+
+
 def _state_path(base: str, token: str, room: str) -> str:
     """Per-(server, credential, room) mode file, in the same spirit as the hook's
     throttle marker: two agents on one box must not share state."""
     key = hashlib.sha256(f"{base}|{token}|{room}".encode()).hexdigest()[:16]
-    return os.path.join(os.environ.get("TMPDIR") or "/tmp", f"chatroom-watch-{key}")
+    return os.path.join(_tmpdir(), f"chatroom-watch-{key}")
 
 
 def _read_state(path: str) -> dict[str, str]:
@@ -452,7 +460,7 @@ def watch(base: str, token: str, room: str, agent: str, launch_mode: str) -> int
         whose liveness it reports.
         """
         try:
-            tmp = os.environ.get("TMPDIR") or "/tmp"
+            tmp = _tmpdir()
             with open(os.path.join(tmp, "chatroom-watch-heartbeat"), "w") as fh:
                 fh.write(f"{int(time.time())} {agent} {room} {__version__}\n")
         except OSError:

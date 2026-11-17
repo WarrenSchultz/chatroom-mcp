@@ -64,6 +64,7 @@ Environment:
     CHATROOM_HOOK_VERSION_INTERVAL    seconds between drift notices (default 86400)
     CHATROOM_WATCH_EXPECTED=1  this box runs a push watcher, so say when it dies
     CHATROOM_WATCH_STALE_S     watcher heartbeat age that means dead (default 600)
+    CHATROOM_WATCH_NOTICE_INTERVAL  seconds between dead-watcher notices (default 3600)
 
 Two things this reports besides room activity, both throttled and both silent unless
 something is actually wrong:
@@ -93,7 +94,7 @@ import os
 import sys
 import time
 
-__version__ = "1.2.0"
+__version__ = "1.2.2"
 
 TIMEOUT = 5.0
 MAX_EVENTS = 25
@@ -121,6 +122,9 @@ VERSION_NOTICE_INTERVAL = float(os.environ.get("CHATROOM_HOOK_VERSION_INTERVAL",
 #: beats on every event and on its own idle timer, so several minutes of silence is real.
 WATCH_HEARTBEAT_STALE_S = float(os.environ.get("CHATROOM_WATCH_STALE_S", "600"))
 
+#: How often a dead watcher is re-reported while it stays dead.
+WATCH_NOTICE_INTERVAL = float(os.environ.get("CHATROOM_WATCH_NOTICE_INTERVAL", "3600"))
+
 # Identify ourselves explicitly. urllib's default "Python-urllib/3.x" is treated as bot
 # traffic by Cloudflare (and most WAFs): published through a tunnel, the bus answers curl
 # fine but 403s this hook at the edge. Because the hook fails open, that presents as peer
@@ -140,6 +144,44 @@ def _debug(msg: str) -> None:
         print(f"[chatroom-hook] {msg}", file=sys.stderr)
 
 
+def _stdin_ready(timeout: float) -> bool:
+    """True once stdin has data or is at EOF, so one read of it will not block.
+
+    select() is the POSIX answer, but on Windows it accepts only sockets and raises
+    on a pipe. That used to land in _hook_event's catch-all, so on Windows every
+    PostToolUse ran as UserPromptSubmit: unthrottled, consuming the cursor, printing
+    the wrong format. Windows asks the pipe directly instead.
+    """
+    if os.name != "nt":
+        import select  # noqa: PLC0415 - deferred: costs nothing on the suppressed path
+        return bool(select.select([sys.stdin], [], [], timeout)[0])
+    import ctypes  # noqa: PLC0415
+    import msvcrt  # noqa: PLC0415
+    from ctypes import wintypes  # noqa: PLC0415
+    handle = wintypes.HANDLE(msvcrt.get_osfhandle(sys.stdin.fileno()))
+    avail = wintypes.DWORD()
+    deadline = time.monotonic() + timeout
+    while True:
+        # Fails when stdin is not a pipe (a redirected file, which never blocks) or the
+        # writer has closed it (read returns EOF at once). Either way the read is safe.
+        if not ctypes.windll.kernel32.PeekNamedPipe(handle, None, 0, None,
+                                                    ctypes.byref(avail), None):
+            return True
+        if avail.value:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+
+
+def _tmpdir() -> str:
+    """Where state files live. Windows sets TEMP/TMP, not TMPDIR, and has no /tmp, so a
+    bare TMPDIR-or-/tmp fallback meant every state write there failed silently. Env
+    vars rather than tempfile.gettempdir(), which is an import on the hot path."""
+    return (os.environ.get("TMPDIR") or os.environ.get("TEMP")
+            or os.environ.get("TMP") or "/tmp")
+
+
 def _hook_event() -> str:
     """Which event invoked us. Claude Code passes JSON on stdin; env var wins for tests.
 
@@ -156,8 +198,7 @@ def _hook_event() -> str:
         # that leaves stdin open would otherwise hang this hook forever — and a hook that
         # hangs stalls the agent on every tool call. Wait briefly for data to be there,
         # then take one non-blocking chunk; the payload is a few hundred bytes.
-        import select  # noqa: PLC0415 - deferred: costs nothing on the suppressed path
-        if not select.select([sys.stdin], [], [], 0.25)[0]:
+        if not _stdin_ready(0.25):
             return "UserPromptSubmit"
         raw = os.read(sys.stdin.fileno(), 65536).decode("utf-8", "replace")
         if raw.strip():
@@ -170,13 +211,14 @@ def _hook_event() -> str:
 
 def _throttle_file(base: str, token: str, room: str | None) -> str:
     """Marker path. os.path rather than pathlib, and $TMPDIR rather than tempfile,
-    because both of those imports are pure cost on the path that runs most often.
+    because both of those imports are pure cost on the path that runs most often
+    (see _tmpdir).
 
     Keyed on the identity whose cursor is at stake, not on the session: two sessions
     sharing a token share a cursor, so they should share a throttle too.
     """
     key = hashlib.sha256(f"{base}|{token}|{room or ''}".encode()).hexdigest()[:16]
-    tmp = os.environ.get("TMPDIR") or "/tmp"
+    tmp = _tmpdir()
     return os.path.join(tmp, f"chatroom-hook-{key}")
 
 
@@ -248,7 +290,7 @@ def _version_notice(server_version: str, token: str, room: str | None) -> str:
             f"(Silence: CHATROOM_HOOK_VERSION_CHECK=off)")
 
 
-def _watcher_notice() -> str:
+def _watcher_notice(token: str = "", room: str | None = None) -> str:
     """One line when a push watcher is EXPECTED but its heartbeat is stale, else ''.
 
     Opt-in via CHATROOM_WATCH_EXPECTED=1, because the hook cannot tell "the watcher died"
@@ -258,22 +300,43 @@ def _watcher_notice() -> str:
     Reads a heartbeat file rather than scanning the process table: the watcher may be under
     a different user or supervisor, and a liveness check should confirm the thing is WORKING
     (writing beats) rather than merely present in `ps`.
+
+    Throttled (default: once an hour, CHATROOM_WATCH_NOTICE_INTERVAL). Unthrottled it
+    repeated on every prompt and every in-loop check for as long as the watcher stayed
+    down, which pushed agents into turning the check off. A fresh heartbeat clears the
+    throttle, so a watcher that dies again soon after recovering is reported at once.
     """
     if os.environ.get("CHATROOM_WATCH_EXPECTED", "").strip().lower() not in _ON:
         return ""
-    tmp = os.environ.get("TMPDIR") or "/tmp"
-    path = os.path.join(tmp, "chatroom-watch-heartbeat")
+    path = os.path.join(_tmpdir(), "chatroom-watch-heartbeat")
+    gate = _throttle_file("watchnotice", token, room)
     try:
-        age = time.time() - os.stat(path).st_mtime
+        age: float | None = time.time() - os.stat(path).st_mtime
     except OSError:
+        age = None
+    if age is not None and age <= WATCH_HEARTBEAT_STALE_S:
+        try:
+            os.remove(gate)
+        except OSError:
+            pass
+        return ""
+    try:
+        if time.time() - os.stat(gate).st_mtime < WATCH_NOTICE_INTERVAL:
+            return ""
+    except OSError:
+        pass                            # never warned, or unreadable: due
+    try:
+        with open(gate, "w"):
+            pass
+    except OSError:
+        pass                            # cannot record it; warn now rather than never
+    if age is None:
         return ("chatroom: push watcher expected (CHATROOM_WATCH_EXPECTED=1) but it has "
                 "never reported. Arm it: Monitor(command=\"python3 chatroom_watch.py\", "
                 "persistent=true). Fetch it with GET /v1/watch.")
-    if age > WATCH_HEARTBEAT_STALE_S:
-        return (f"chatroom: push watcher last reported {int(age // 60)}m ago (stale). It "
-                f"does not outlive its host session — re-arm it with "
-                f"Monitor(persistent=true).")
-    return ""
+    return (f"chatroom: push watcher last reported {int(age // 60)}m ago (stale). It "
+            f"does not outlive its host session — re-arm it with "
+            f"Monitor(persistent=true).")
 
 
 def _emit(event: str, text: str) -> None:
@@ -387,7 +450,7 @@ def main() -> int:
     # on a quiet bus is exactly the case that would otherwise never be reported, since the
     # quiet path returns early. Both are self-throttled, so this stays silent almost always.
     notices = [n for n in (_version_notice(server_hook_version, token, room),
-                           _watcher_notice()) if n]
+                           _watcher_notice(token, room)) if n]
 
     if not events and not onboarding:
         _debug("nothing unread — this is a healthy quiet room, not a failure")

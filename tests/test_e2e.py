@@ -1570,6 +1570,55 @@ def main() -> int:
         check("an absent header is not treated as drift",
               _hook._version_notice("", "tok", "ops") == "")
 
+        # Windows: select() raises on a pipe, which silently turned every PostToolUse into
+        # UserPromptSubmit (unthrottled, cursor consumed). There is no Windows box in CI, so
+        # drive the PeekNamedPipe branch with a fake kernel32 and msvcrt.
+        import ctypes
+        import types as _types
+        saved = (os.name, getattr(ctypes, "windll", None), sys.modules.get("msvcrt"))
+        script: list = []
+
+        def _peek(handle, buf, size, read, avail_ref, left):
+            r = script.pop(0) if len(script) > 1 else script[0]
+            if r is None:
+                return 0
+            avail_ref._obj.value = r
+            return 1
+        try:
+            _hook.os.name = "nt"
+            ctypes.windll = _types.SimpleNamespace(
+                kernel32=_types.SimpleNamespace(PeekNamedPipe=_peek))
+            sys.modules["msvcrt"] = _types.SimpleNamespace(get_osfhandle=lambda fd: 1234)
+            script[:] = [0, 0, 80]
+            check("Windows: stdin readiness waits for the pipe to have data",
+                  _hook._stdin_ready(0.5) is True)
+            script[:] = [0]
+            check("...and gives up after the timeout when it never does",
+                  _hook._stdin_ready(0.05) is False)
+            script[:] = [None]
+            check("...and treats a non-pipe or closed stdin as readable",
+                  _hook._stdin_ready(0.05) is True)
+        finally:
+            _hook.os.name = saved[0]
+            if saved[1] is None:
+                del ctypes.windll
+            else:
+                ctypes.windll = saved[1]
+            if saved[2] is None:
+                sys.modules.pop("msvcrt", None)
+            else:
+                sys.modules["msvcrt"] = saved[2]
+
+        # Windows sets TEMP, not TMPDIR, and has no /tmp: state files were never written.
+        os.environ.pop("TMPDIR")
+        os.environ["TEMP"] = tmpdir
+        import chatroom_watch as _watch
+        check("state files fall back to TEMP when TMPDIR is unset",
+              _hook._tmpdir() == tmpdir and _watch._tmpdir() == tmpdir,
+              f"{_hook._tmpdir()} / {_watch._tmpdir()}")
+        os.environ.pop("TEMP")
+        os.environ["TMPDIR"] = tmpdir
+
         # Watcher liveness is opt-in: a box that never wanted push delivery must not be
         # nagged about a watcher it deliberately does not run.
         os.environ.pop("CHATROOM_WATCH_EXPECTED", None)
@@ -1582,6 +1631,14 @@ def main() -> int:
         check("...stays silent while the heartbeat is fresh", _hook._watcher_notice() == "")
         os.utime(beat, (time.time() - 4000, time.time() - 4000))
         check("...and reports a stale heartbeat as dead",
+              "stale" in _hook._watcher_notice())
+        # Unthrottled, this repeated on every check while the watcher stayed down.
+        check("...but only once per interval while it stays dead",
+              _hook._watcher_notice() == "")
+        beat.write_text("now\n")
+        _hook._watcher_notice()
+        os.utime(beat, (time.time() - 4000, time.time() - 4000))
+        check("...and a recovery resets that, so the next death is reported at once",
               "stale" in _hook._watcher_notice())
         os.environ.pop("CHATROOM_WATCH_EXPECTED")
 
