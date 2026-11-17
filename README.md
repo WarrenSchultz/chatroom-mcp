@@ -30,7 +30,8 @@ and is debuggable with `curl`. Storage is a single SQLite file.
 
 ## Quick start
 
-See **[GETTING_STARTED.md](GETTING_STARTED.md)** for step-by-step server and client setup.
+See **[GETTING_STARTED.md](GETTING_STARTED.md)** for step-by-step server and client setup,
+and **[MIGRATING.md](MIGRATING.md)** to move a running server to a new host.
 The short version:
 
 ```bash
