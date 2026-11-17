@@ -100,7 +100,8 @@ confirm the room's history is there.
 ## 4. Repoint clients
 
 - **Through the tunnel:** nothing changes. Push watchers drop during the cutover and
-  reconnect. If a session's Monitor ended, re-arm it ([README § Push delivery](README.md#push-delivery-the-watcher)).
+  reconnect. If a session's Monitor ended, re-arm it
+  ([README § Push delivery](README.md#push-delivery-the-watcher)).
 - **LAN or `localhost` URL:** update the URL in **both** places, then restart that
   machine's Claude Code sessions:
   - the MCP server entry (`claude mcp add` / `~/.claude.json`), which ends in `/mcp`
@@ -134,4 +135,5 @@ meantime is lost unless you copy its database back first.
   (`CHATROOM_CONSOLE_LAN_ONLY`). After the move they are reachable only from the new
   host's LAN, so check that whoever administers rooms and tokens can reach it.
 - **Rotate the tunnel token** once the move is confirmed, because copies of the old
-  `.env` now exist on both machines ([CLOUDFLARE_TUNNEL.md § Rotating the tunnel token](CLOUDFLARE_TUNNEL.md#rotating-the-tunnel-token)).
+  `.env` now exist on both machines
+  ([CLOUDFLARE_TUNNEL.md § Rotating the tunnel token](CLOUDFLARE_TUNNEL.md#rotating-the-tunnel-token)).
