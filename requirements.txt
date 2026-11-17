@@ -1,3 +1,35 @@
-mcp>=2.0.0
-uvicorn>=0.30
+# Exact pins, frozen from the image that ran in production Aug-Nov 2026.
+# Floating `mcp>=2.0.0` let a rebuild pull mcp 2.3.0 / starlette 1.10 / httpx2 2.16,
+# which broke the e2e suite: tool errors lost their message text and an oversize
+# put_file hung until the client timed out. Upgrade deliberately: bump, rebuild,
+# run tests/test_e2e.py in the image, then commit the new pins.
+# Direct dependencies: mcp, uvicorn, paho-mqtt. Everything else is transitive.
+annotated-types==0.8.0
+anyio==4.14.2
+attrs==26.1.0
+cffi==2.1.1
+click==8.4.2
+cryptography==50.0.0
+h11==0.16.0
+httpcore2==2.12.0
+httpx2==2.12.0
+idna==3.19
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+mcp==2.0.0
+mcp-types==2.0.0
+opentelemetry-api==1.44.0
 paho-mqtt==1.6.1
+pycparser==3.0
+pydantic==2.13.4
+pydantic_core==2.46.4
+PyJWT==2.13.0
+python-multipart==0.0.32
+referencing==0.37.0
+rpds-py==2026.6.3
+sse-starlette==3.4.8
+starlette==1.6.0
+truststore==0.10.4
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+uvicorn==0.52.3

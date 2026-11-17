@@ -46,3 +46,5 @@ services:
       CHATROOM_PRUNE_INTERVAL: "${CHATROOM_PRUNE_INTERVAL:-3600}"
       # Keep under Cloudflare's 100s edge timeout so long polls survive a tunnel.
       CHATROOM_MAX_WAIT_S: "${CHATROOM_MAX_WAIT_S:-90}"
+      # Per-call size budget for read_messages, so a page fits the caller's tool-result cap.
+      CHATROOM_MAX_READ_CHARS: "${CHATROOM_MAX_READ_CHARS:-60000}"

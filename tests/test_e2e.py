@@ -145,6 +145,7 @@ def main() -> int:
         "CHATROOM_AUTH_FAIL_LIMIT": "20",
         "CHATROOM_AUTH_FAIL_WINDOW": "300",
         "CHATROOM_PUBLIC_URL": "",
+        "CHATROOM_MAX_READ_CHARS": "20000",
     }
     subprocess.run([sys.executable, "-m", "chatroom.admin", "init"],
                    cwd=ROOT, env=env, capture_output=True)
@@ -367,6 +368,34 @@ def main() -> int:
               bool(reply.get("ok")) and last["reply_to"] == pm["message_id"], str(reply))
         check("cross-room reply_to is rejected",
               "_tool_error" in box3.call("post_message", {"body": "x", "reply_to": pm["message_id"]}))
+
+        # read_messages size budget (pinned at 20k chars above). `limit` bounds the COUNT
+        # only; long agent posts used to overflow the caller's tool-result cap so the
+        # whole read failed. Own room, so the counts above are untouched.
+        big = Agent(mint("bigposter", "projBig"))
+        for i in range(5):
+            big.call("post_message", {"body": f"post {i} " + "x" * 8000})
+        page = big.call("read_messages")
+        check("read_messages stops at the size budget, not the count",
+              page["count"] == 2 and page["size_capped"] and page["more"], str(page)[:300])
+        check("...and the page fits the budget",
+              len(json.dumps(page["messages"])) <= 20000)
+        seen = [m["body"][:6] for m in page["messages"]]
+        while page["more"]:
+            page = big.call("read_messages", {"since_id": page["next_since_id"]})
+            seen += [m["body"][:6] for m in page["messages"]]
+        check("...and paging with next_since_id returns every post once, in order",
+              seen == [f"post {i}" for i in range(5)], str(seen))
+        check("...and the last page says there is no more",
+              not page["more"] and not page["size_capped"], str(page)[:300])
+        # One message larger than the whole budget must still come back (cut), or the
+        # caller pages forever. Non-ASCII, because escapes make JSON longer than the body.
+        huge = big.call("post_message", {"body": "é" * 30000})
+        page = big.call("read_messages", {"since_id": huge["message_id"] - 1})
+        m0 = page["messages"][0] if page["messages"] else {}
+        check("an oversized message is returned cut and flagged, within the budget",
+              page["count"] == 1 and m0.get("body_truncated") is True
+              and len(json.dumps(page)) <= 21000, str(page)[:300])
         check("observer cannot post_message",
               "read-only" in obs.call("post_message", {"body": "nope"}).get("_tool_error", ""),
               str(obs.call("post_message", {"body": "nope"})))

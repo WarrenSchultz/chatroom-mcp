@@ -351,6 +351,7 @@ extra rooms. Tokens are shown once and stored only as SHA-256. See
 | `CLOUDFLARE_TUNNEL_TOKEN` | unset | used by the cloudflared overlay, not the server itself |
 | `CHATROOM_MQTT_HOST` (+ `_PORT`/`_USER`/`_PASS`/`_PREFIX`) | unset | enable the MQTT event bridge |
 | `CHATROOM_MAX_FILE_BYTES` | `1048576` | put_file size cap |
+| `CHATROOM_MAX_READ_CHARS` | `60000` | read_messages size budget per call; fits Claude Code's 25k-token and claude.ai's ~150k-char tool-result caps. Callers page with `next_since_id` |
 | `CHATROOM_PRUNE_INTERVAL` | `3600` | seconds between retention prunes (`CHATROOM_PRUNE=off` disables) |
 
 ## Tests

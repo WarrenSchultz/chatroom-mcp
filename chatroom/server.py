@@ -64,6 +64,13 @@ MAX_FILE_BYTES = int(os.environ.get("CHATROOM_MAX_FILE_BYTES", str(1024 * 1024))
 # calls wait_for_change again, so a shorter ceiling costs nothing but a round trip.
 MAX_WAIT_S = int(os.environ.get("CHATROOM_MAX_WAIT_S", "90"))
 
+# Size budget for one read_messages result, in characters of serialized messages. The
+# `limit` count alone does not bound size: agents write long posts (~4k chars is
+# typical here), so 50 of them overflow the CALLER's tool-result cap and the whole call
+# fails. Claude Code's default is 25k tokens; claude.ai and the Office agents cap at
+# ~150k chars. 60k fits both with room for the envelope; the caller pages for the rest.
+MAX_READ_CHARS = int(os.environ.get("CHATROOM_MAX_READ_CHARS", "60000"))
+
 INSTRUCTIONS = """\
 This is the shared coordination room for a multi-machine agent team. Your identity
 and project room are fixed by your credential; you never pass them as arguments.
@@ -518,7 +525,10 @@ def post_message(
     description="Read room chat messages in full. Pass since_id to page forward from a "
                 "message id you already have (0 = from the start). This returns full "
                 "message bodies; whats_new() only summarises them. Side-effect free: "
-                "reading chat does not advance your unread cursor."
+                "reading chat does not advance your unread cursor. "
+                "SIZE: one call returns at most ~60k characters, whatever `limit` says, "
+                "so it fits your tool-result limit. When `more` is true, call again with "
+                "since_id=next_since_id for the rest."
 )
 def read_messages(
     ctx: Context,
@@ -530,17 +540,56 @@ def read_messages(
     try:
         rm = _room(ident, room)
         rows = db.read_messages(conn, rm, int(since_id), int(limit))
-        msgs = [db.message_to_dict(r) for r in rows]
+        msgs, size_capped = _within_budget([db.message_to_dict(r) for r in rows],
+                                           MAX_READ_CHARS)
+        latest = db.max_message_id(conn, rm)
+        next_since = msgs[-1]["id"] if msgs else int(since_id)
         return {
             "room": rm,
             "you_are": ident.agent,
             "count": len(msgs),
             "messages": msgs,
-            "latest_id": db.max_message_id(conn, rm),
+            "latest_id": latest,
+            # Paging is explicit, so a caller never mistakes a size-capped page for
+            # "that was everything": `more` covers both the cap and `limit`.
+            "more": latest > next_since,
+            "next_since_id": next_since,
+            "size_capped": size_capped,
             "_note": UNTRUSTED,
         }
     finally:
         conn.close()
+
+
+def _within_budget(msgs: list[dict[str, Any]], budget: int) -> tuple[list[dict[str, Any]], bool]:
+    """Keep messages in order until the next one would exceed `budget` serialized chars.
+
+    Always returns at least one message, so paging makes progress: a single message
+    larger than the whole budget is returned with its body cut and `body_truncated`
+    set, rather than looping the caller on a page it can never receive.
+    """
+    out: list[dict[str, Any]] = []
+    used = 0
+    for m in msgs:
+        size = len(json.dumps(m))
+        if used + size <= budget:
+            out.append(m)
+            used += size
+            continue
+        if not out:
+            body = m["body"]
+            keep = max(0, len(body) - (size - budget) - 200)
+
+            def cut(n: int) -> dict[str, Any]:
+                return {**m, "body": body[:n] + f"\n[... {len(body) - n} more chars not "
+                        "shown: this one message exceeds the read size budget]",
+                        "body_truncated": True}
+            # Serialized size is not body length (escapes, non-ASCII), so shrink to fit.
+            while keep > 0 and len(json.dumps(cut(keep))) > budget:
+                keep = int(keep * 0.9)
+            out.append(cut(keep))
+        return out, True
+    return out, False
 
 
 @mcp.tool(
